@@ -1,0 +1,7 @@
+name: astrbot_plugin_free_image
+display_name: 图片生成插件
+desc: 强大的图片生成插件。不仅支持文生图、图生图，还在API 容灾、自动化配额管理以及大模型工具调用方面达到了工业级标准。
+help: 通过第三方api进行图像生成的插件，支持图生图和文生图，可自定义预设指令
+version: v2.0.0
+author: Singularity2000
+repo: https://github.com/singularity2000/astrbot_plugin_free_image
