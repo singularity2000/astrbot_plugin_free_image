@@ -357,6 +357,10 @@ class VertexAIAnonymousProvider(BaseProvider):
         if system_prompt:
             context["systemInstruction"] = {"parts": [{"text": system_prompt}]}
 
+        if "gemini-3" in model_name.lower():
+            if self.node.get("google_search", True):
+                context["tools"] = [{"googleSearch": {}}]
+
         return {
             "querySignature": QUERY_SIGNATURE,
             "operationName": OPERATION_NAME,

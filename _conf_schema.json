@@ -27,6 +27,12 @@
                         "options": ["1K", "2K", "4K", "智能匹配"],
                         "hint": "生成图片的分辨率等级。'智能匹配'将优先使用提示词中的 1K/2K/4K 关键词，匹配不到则默认 1K。"
                     },
+                    "google_search": {
+                        "description": "启用谷歌搜索",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "允许模型使用谷歌搜索获取实时信息（仅 gemini-3 系模型有效）"
+                    },
                     "system_prompt": {
                         "description": "系统提示词",
                         "type": "text",
