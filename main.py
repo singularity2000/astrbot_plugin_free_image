@@ -127,7 +127,9 @@ class ImageGenerationPlugin(Star):
         text = event.message_str.strip()
         if not text:
             return
-        cmd = text.split()[0].strip()
+        parts = text.split(maxsplit=1)
+        cmd = parts[0].strip()
+        extra_text = parts[1].strip() if len(parts) > 1 else ""
         bnn_command = "图生图"
         user_prompt = ""
         if cmd == bnn_command:
@@ -140,8 +142,9 @@ class ImageGenerationPlugin(Star):
             # 图生图命令交由专用 command 处理，避免重复触发
             return
         elif cmd in self.prompt_map:
-            user_prompt = self.prompt_map.get(cmd)
-            display_cmd = cmd
+            base_prompt = self.prompt_map.get(cmd)
+            user_prompt = f"{base_prompt} {extra_text}" if extra_text else base_prompt
+            display_cmd = f"{cmd} {extra_text}".strip()
         else:
             return
 
@@ -355,11 +358,17 @@ class ImageGenerationPlugin(Star):
     @filter.command("画图帮助", aliases={"lmh", "lm帮助"}, prefix_optional=True)
     async def on_prompt_help(self, event: AstrMessageEvent):
         keyword = event.message_str.strip()
+        # 移除指令名本身（支持别名）
+        for cmd in ("画图帮助", "lmh", "lm帮助"):
+            if keyword.startswith(cmd):
+                keyword = keyword.removeprefix(cmd).strip()
+                break
         if not keyword:
             msg = "图生图预设指令: \n"
             msg += "、".join(self.prompt_map.keys())
-            msg += "\n\n纯文本生图指令: \n#文生图 <你的描述>"
-            msg += "\n\n发送图片 + 预设指令 或 @用户 + 预设指令 来进行图生图。"
+            msg += "\n\n#画图帮助 <预设指令> 来查看对应模板的详细内容"
+            msg += "\n\n生图指令: \n#文生图 <你的描述> \n#图生图 <你的描述>（发送图片 或 引用图片 或 @用户,若为空则使用你的头像）"
+            msg += "\n#预设指令 + 发送图片 或 引用图片 或 @用户 来使用模板图生图"
             yield event.plain_result(msg)
             return
 
