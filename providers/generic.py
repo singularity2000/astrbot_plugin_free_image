@@ -16,7 +16,7 @@ class GenericImageProvider(BaseProvider):
 
     async def generate(
         self, image_bytes_list: List[bytes], prompt: str
-    ) -> Union[bytes, str]:
+    ) -> Union[bytes, list[bytes], str]:
         api_url = self.node.get("api_url")
         if not api_url:
             return f"{self.name}: 配置错误 - 未设置 API URL"
@@ -60,10 +60,23 @@ class GenericImageProvider(BaseProvider):
                     else:
                         data = await resp.json()
                         try:
-                            url = data[data_form][0]["url"]
-                            if url.startswith("data:image/"):
-                                return base64.b64decode(url.split(",", 1)[1])
-                            return await self.iwf._download_image(url) or "下载失败"
+                            image_results: list[bytes] = []
+                            for item in data[data_form]:
+                                url = item["url"]
+                                if url.startswith("data:image/"):
+                                    image_results.append(
+                                        base64.b64decode(url.split(",", 1)[1])
+                                    )
+                                    continue
+                                downloaded = await self.iwf._download_image(url)
+                                if downloaded:
+                                    image_results.append(downloaded)
+
+                            if len(image_results) == 1:
+                                return image_results[0]
+                            if image_results:
+                                return image_results
+                            last_err = "下载失败"
                         except Exception:
                             last_err = f"解析响应失败: {str(data)[:200]}"
             except Exception as e:

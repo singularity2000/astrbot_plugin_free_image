@@ -2,7 +2,7 @@ import asyncio
 import random
 import re
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Literal, Optional
 
 from astrbot import logger
 from astrbot.api.event import filter
@@ -109,7 +109,7 @@ class ImageGenerationPlugin(Star):
         async def _run_background_gen():
             try:
                 async for result in self.handle_image_gen_logic(
-                    event, prompt, is_i2i=is_i2i
+                    event, prompt, is_i2i=is_i2i, request_source="llm_tool"
                 ):
                     await event.send(result)
             except Exception as e:
@@ -143,13 +143,19 @@ class ImageGenerationPlugin(Star):
             return
         elif cmd in self.prompt_map:
             base_prompt = self.prompt_map.get(cmd)
+            if base_prompt is None:
+                return
             user_prompt = f"{base_prompt} {extra_text}" if extra_text else base_prompt
             display_cmd = f"{cmd} {extra_text}".strip()
         else:
             return
 
         async for res in self.handle_image_gen_logic(
-            event, user_prompt, is_i2i=True, display_name=display_cmd
+            event,
+            user_prompt,
+            is_i2i=True,
+            display_name=display_cmd,
+            request_source="command",
         ):
             yield res
         event.stop_event()
@@ -161,7 +167,9 @@ class ImageGenerationPlugin(Star):
             yield event.plain_result("请提供文生图的描述。用法: #文生图 <描述>")
             return
 
-        async for res in self.handle_image_gen_logic(event, prompt, is_i2i=False):
+        async for res in self.handle_image_gen_logic(
+            event, prompt, is_i2i=False, request_source="command"
+        ):
             yield res
         event.stop_event()
 
@@ -176,17 +184,136 @@ class ImageGenerationPlugin(Star):
             )
             return
 
-        async for res in self.handle_image_gen_logic(event, prompt, is_i2i=True):
+        async for res in self.handle_image_gen_logic(
+            event, prompt, is_i2i=True, request_source="command"
+        ):
             yield res
         event.stop_event()
+
+    def _is_group_chat(self, event: AstrMessageEvent) -> bool:
+        return bool(event.get_group_id())
+
+    def _normalize_image_results(self, res) -> list[bytes]:
+        if isinstance(res, bytes):
+            return [res]
+        if isinstance(res, list):
+            return [item for item in res if isinstance(item, bytes)]
+        return []
+
+    def _build_success_caption(
+        self,
+        *,
+        elapsed: float,
+        is_i2i: bool,
+        display_name: str,
+        is_master: bool,
+        sender_id: str,
+        group_id: str,
+    ) -> str:
+        caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)"]
+        if is_i2i:
+            caption_parts.append(f"预设: {display_name}")
+
+        if is_master:
+            caption_parts.append("管理员剩余次数: ∞")
+        else:
+            if self.conf.get("enable_user_limit", True):
+                caption_parts.append(
+                    f"个人剩余次数: {self.persistence.get_user_count(sender_id)}"
+                )
+            if self.conf.get("enable_group_limit", False) and group_id:
+                caption_parts.append(
+                    f"本群剩余次数: {self.persistence.get_group_count(group_id)}"
+                )
+
+        return " | ".join(caption_parts)
+
+    def _should_quote_reply(
+        self,
+        *,
+        request_source: Literal["command", "llm_tool"],
+    ) -> bool:
+        mode = self.conf.get("quote_reply_mode", "始终引用回复")
+        if mode == "始终单独发送":
+            return False
+        if mode == "命令引用回复，函数调用单独发送":
+            return request_source == "command"
+        if mode == "命令单独发送，函数调用引用回复":
+            return request_source == "llm_tool"
+        return True
+
+    def _should_split_multi_images(self, *, event: AstrMessageEvent) -> bool:
+        mode = self.conf.get("multi_image_send_mode", "始终不分条")
+        is_group = self._is_group_chat(event)
+        if mode == "始终分条":
+            return True
+        if mode == "群聊不分条，私聊分条":
+            return not is_group
+        if mode == "群聊分条，私聊不分条":
+            return is_group
+        return False
+
+    async def _yield_success_images(
+        self,
+        *,
+        event: AstrMessageEvent,
+        images: list[bytes],
+        caption_text: str,
+        concise_mode: bool,
+        request_source: Literal["command", "llm_tool"],
+    ):
+        quote_reply = self._should_quote_reply(request_source=request_source)
+        split_images = len(images) > 1 and self._should_split_multi_images(event=event)
+        reply_component = Reply(id=event.message_obj.message_id)
+
+        if concise_mode:
+            logger.info(caption_text)
+            if split_images:
+                for img in images:
+                    chain = [Image.fromBytes(img)]
+                    if quote_reply:
+                        chain.insert(0, reply_component)
+                    yield event.chain_result(chain)
+                return
+
+            chain = [Image.fromBytes(img) for img in images]
+            if quote_reply:
+                chain.insert(0, reply_component)
+            yield event.chain_result(chain)
+            return
+
+        if split_images:
+            yield event.chain_result([reply_component, Plain(caption_text)])
+            for img in images:
+                chain = [Image.fromBytes(img)]
+                if quote_reply:
+                    chain.insert(0, reply_component)
+                yield event.chain_result(chain)
+            return
+
+        if quote_reply:
+            chain = [Image.fromBytes(img) for img in images]
+            chain.append(Plain(caption_text))
+            chain.insert(0, reply_component)
+            yield event.chain_result(chain)
+            return
+
+        yield event.chain_result([reply_component, Plain(caption_text)])
+        chain = [Image.fromBytes(img) for img in images]
+        yield event.chain_result(chain)
 
     async def handle_image_gen_logic(
         self,
         event: AstrMessageEvent,
         prompt: str,
         is_i2i: bool,
-        display_name: str = None,
+        display_name: str | None = None,
+        request_source: Literal["command", "llm_tool"] = "command",
     ):
+        if not self.pipeline:
+            yield event.plain_result("❌ 插件尚未完成初始化，请稍后再试。")
+            return
+
         sender_id = event.get_sender_id()
         group_id = event.get_group_id()
         is_master = self.is_global_admin(event)
@@ -269,31 +396,24 @@ class ImageGenerationPlugin(Star):
         res = await self.pipeline.execute(images_to_process, prompt)
         elapsed = (datetime.now() - start_time).total_seconds()
 
-        if isinstance(res, bytes):
-            caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)"]
-            if is_i2i:
-                caption_parts.append(f"预设: {display_name}")
-
-            if is_master:
-                caption_parts.append("管理员剩余次数: ∞")
-            else:
-                if self.conf.get("enable_user_limit", True):
-                    caption_parts.append(
-                        f"个人剩余次数: {self.persistence.get_user_count(sender_id)}"
-                    )
-                if self.conf.get("enable_group_limit", False) and group_id:
-                    caption_parts.append(
-                        f"本群剩余次数: {self.persistence.get_group_count(group_id)}"
-                    )
-
-            caption_text = " | ".join(caption_parts)
-            if concise_mode:
-                logger.info(caption_text)
-                yield event.chain_result(
-                    [Reply(id=event.message_obj.message_id), Image.fromBytes(res)]
-                )
-            else:
-                yield event.chain_result([Image.fromBytes(res), Plain(caption_text)])
+        image_results = self._normalize_image_results(res)
+        if image_results:
+            caption_text = self._build_success_caption(
+                elapsed=elapsed,
+                is_i2i=is_i2i,
+                display_name=display_name,
+                is_master=is_master,
+                sender_id=sender_id,
+                group_id=group_id,
+            )
+            async for msg in self._yield_success_images(
+                event=event,
+                images=image_results,
+                caption_text=caption_text,
+                concise_mode=concise_mode,
+                request_source=request_source,
+            ):
+                yield msg
         elif isinstance(res, dict) and res.get("type") == "video" and res.get("url"):
             caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)", "结果类型: 视频"]
             if is_i2i:

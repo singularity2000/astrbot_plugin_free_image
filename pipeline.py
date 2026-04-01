@@ -50,10 +50,10 @@ class ImageGenPipeline:
 
     async def execute(
         self, image_bytes_list: List[bytes], prompt: str
-    ) -> Union[bytes, str, dict[str, str]]:
+    ) -> Union[bytes, list[bytes], str, dict[str, str]]:
         """
         依次调用管线中已启用的 Provider。
-        返回 bytes / dict 表示成功媒体结果，返回 str 表示全部失败（汇总错误信息）。
+        返回 bytes / list[bytes] / dict 表示成功媒体结果，返回 str 表示全部失败（汇总错误信息）。
         """
         errors: List[str] = []
         for provider in self.providers:
@@ -61,7 +61,7 @@ class ImageGenPipeline:
                 continue
             logger.info(f"[Pipeline] 尝试: {provider.name}")
             result = await provider.generate(image_bytes_list, prompt)
-            if isinstance(result, (bytes, dict)):
+            if isinstance(result, (bytes, list, dict)):
                 return result
             logger.warning(f"[Pipeline] {provider.name} 失败: {result}")
             errors.append(f"{provider.name}: {result}")

@@ -10,7 +10,7 @@ class OpenAIResponsesProvider(BaseProvider):
 
     async def generate(
         self, image_bytes_list: List[bytes], prompt: str
-    ) -> Union[bytes, str]:
+    ) -> Union[bytes, list[bytes], str]:
         api_url = self.node.get("api_url")
         model_name = self.node.get("model")
 
@@ -52,22 +52,28 @@ class OpenAIResponsesProvider(BaseProvider):
                             resp.status, str(data)
                         )
                     else:
-                        b64 = None
+                        image_results: list[bytes] = []
                         if data.get("object") == "response":
                             for item in data.get("output", []):
                                 if item.get("type") == "image_generation_call":
                                     b64 = item.get("result")
-                                    break
-                        if not b64:
+                                    if b64:
+                                        if "base64," in b64:
+                                            b64 = b64.split("base64,", 1)[1]
+                                        image_results.append(base64.b64decode(b64))
+                        if not image_results:
                             for item in data.get("data", []):
                                 if item.get("type") == "image_result":
                                     b64 = item.get("b64_json")
-                                    break
+                                    if b64:
+                                        if "base64," in b64:
+                                            b64 = b64.split("base64,", 1)[1]
+                                        image_results.append(base64.b64decode(b64))
 
-                        if b64:
-                            if "base64," in b64:
-                                b64 = b64.split("base64,", 1)[1]
-                            return base64.b64decode(b64)
+                        if len(image_results) == 1:
+                            return image_results[0]
+                        if image_results:
+                            return image_results
                         last_err = "未找到图像数据"
             except Exception as e:
                 last_err = str(e)

@@ -152,7 +152,7 @@ class VertexAIAnonymousProvider(BaseProvider):
 
     async def generate(
         self, image_bytes_list: List[bytes], prompt: str
-    ) -> Union[bytes, str]:
+    ) -> Union[bytes, list[bytes], str]:
         if not CURL_CFFI_AVAILABLE:
             return "Vertex AI 生成失败: 环境缺失 curl_cffi，无法规避 Google 指纹风控。请安装 curl_cffi 后重试。"
 
@@ -255,7 +255,12 @@ class VertexAIAnonymousProvider(BaseProvider):
                         if parsed:
                             error_status_code = parsed["status_code"]
                             if parsed["image_data"]:
-                                return base64.b64decode(parsed["image_data"])
+                                image_data = parsed["image_data"]
+                                if isinstance(image_data, list):
+                                    return [
+                                        base64.b64decode(item) for item in image_data
+                                    ]
+                                return base64.b64decode(image_data)
                             if parsed["safety_blocked"]:
                                 return parsed["last_err"]
                             current_iter_err = parsed["last_err"]
@@ -367,6 +372,7 @@ class VertexAIAnonymousProvider(BaseProvider):
 
         last_err = None
         status_code = None
+        image_results: list[str] = []
 
         for elem in result:
             for item in elem.get("results", []):
@@ -390,16 +396,25 @@ class VertexAIAnonymousProvider(BaseProvider):
                     if candidate.get("finishReason") == "STOP":
                         for part in candidate.get("content", {}).get("parts", []):
                             if "inlineData" in part and part["inlineData"].get("data"):
-                                image_data = part["inlineData"]["data"]
-                                return {
-                                    "image_data": image_data,
-                                    "status_code": None,
-                                    "last_err": None,
-                                    "safety_blocked": False,
-                                }
+                                image_results.append(part["inlineData"]["data"])
                     elif candidate.get("finishReason"):
                         last_err = f"生成中断: {candidate.get('finishReason')}"
                         continue
+
+        if len(image_results) == 1:
+            return {
+                "image_data": image_results[0],
+                "status_code": None,
+                "last_err": None,
+                "safety_blocked": False,
+            }
+        if image_results:
+            return {
+                "image_data": image_results,
+                "status_code": None,
+                "last_err": None,
+                "safety_blocked": False,
+            }
 
         return {
             "image_data": None,

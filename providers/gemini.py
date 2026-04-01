@@ -13,7 +13,7 @@ class GeminiProvider(BaseProvider):
 
     async def generate(
         self, image_bytes_list: List[bytes], prompt: str
-    ) -> Union[bytes, str]:
+    ) -> Union[bytes, list[bytes], str]:
         api_url = self.node.get("api_url")
         model_name = self.node.get("model", "gemini-3.1-flash-image-preview")
         if not api_url:
@@ -147,12 +147,14 @@ class GeminiProvider(BaseProvider):
 
     def _extract_image_or_error(
         self, data: Dict[str, Any]
-    ) -> Optional[Union[bytes, str]]:
-        """返回 bytes=成功；str=终止错误；None=未取到图片。"""
+    ) -> Optional[Union[bytes, list[bytes], str]]:
+        """返回 bytes/list[bytes]=成功；str=终止错误；None=未取到图片。"""
         prompt_feedback = data.get("promptFeedback", {})
         if isinstance(prompt_feedback, dict) and prompt_feedback.get("blockReason"):
             reason = prompt_feedback.get("blockReason", "未知")
             return f"请求被内容安全系统拦截: {reason}"
+
+        image_results: list[bytes] = []
 
         for candidate in data.get("candidates", []):
             finish_reason = candidate.get("finishReason", "")
@@ -167,7 +169,12 @@ class GeminiProvider(BaseProvider):
                 if inline_data and inline_data.get("data"):
                     img_b64 = inline_data["data"]
                     logger.info(f"[Gemini] 成功提取图片数据 ({len(img_b64)} chars)")
-                    return base64.b64decode(img_b64)
+                    image_results.append(base64.b64decode(img_b64))
+
+        if len(image_results) == 1:
+            return image_results[0]
+        if image_results:
+            return image_results
 
         return None
 

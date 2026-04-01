@@ -62,13 +62,29 @@
 
 ### 输出与消息形态
 - **普通模式**
-  - 收到请求：会先回复一条文字提示，例如“收到图生图/文生图请求，正在生成...”
-  - 成功：发送图片 + 文字说明（包含耗时；图生图会带“预设: XXX”；并显示剩余次数）
+  - 收到请求：会先回复一条文字提示，例如“收到图生图/文生图请求，正在生成..."
+  - 成功：默认保持现有链式回复风格。若图片消息设置为“引用回复”，则会尽量保持 `[引用消息][图片...][成功说明]` 的现状；若图片消息设置为“单独发送”，则会先发一条引用回复的成功说明，再单独发送图片消息。
   - 失败：返回失败原因（包含各 Provider 聚合后的错误信息）
 - **简洁模式（仅QQ群聊）**
   - 收到请求：尝试给原消息贴 OK 表情，不主动发文字
   - 成功：只发图片（或视频组件），不附带文字说明，日志中仍保留文字说明
   - 失败：仍会发出失败原因
+
+### 成功消息的可配置行为
+- `quote_reply_mode`：只影响**图片消息**是否显式引用回复。
+  - `始终引用回复`
+  - `始终单独发送`
+  - `命令引用回复，函数调用单独发送`
+  - `命令单独发送，函数调用引用回复`
+- `multi_image_send_mode`：只影响**一次成功结果中的多张图片彼此之间**是否分条发送。
+  - `始终不分条`：多张图片尽量合并为一条图片消息
+  - `始终分条`：多张图片逐张分开发送
+  - `群聊不分条，私聊分条`
+  - `群聊分条，私聊不分条`
+- 规则补充：
+  - 单图时，`multi_image_send_mode` 不会改变消息条数。
+  - 私聊始终按普通模式处理；即使配置中开启了简洁模式，私聊成功时也会保留成功说明。
+  - 普通模式下，成功说明会单独作为引用回复提示用户“图已画好”；若图片消息配置为引用回复，且又是不分条场景，则会保持现有的 `[引用消息][图片...][成功说明]` 合并样式。
 
 ### 个人中心
 - **签到**：`#画图签到`。
@@ -161,12 +177,12 @@
 | template_key | 是否需要 API Key | 返回类型 | 备注 |
 | :--- | :--- | :--- | :--- |
 | `vertex_ai_anonymous` | 否 | 图片 bytes 或错误字符串 | 逆向匿名；依赖 `curl_cffi`；内置 reCAPTCHA 处理、指纹轮换、会话老化。 |
-| `gemini` | 是 | 图片 bytes 或错误字符串 | 支持 `image_size=智能匹配`（从 prompt 里提取 1K/2K/4K）；支持 google_search(仅 gemini-3)。对反代/SSE/噪声响应有兼容解析。 |
-| `vertex_ai` | 是 | 图片 bytes 或错误字符串 | 官方 Vertex AI；请求体更“轻”，不含 image_size/google_search 等扩展字段。 |
-| `openai_responses` | 是 | 图片 bytes 或错误字符串 | 兼容 `/v1/responses` 端点，获取并解析 base64 图片。 |
-| `openai_compat_chat` | 是 | 图片 bytes / 视频 dict / 错误字符串 | 兼容 `/v1/chat/completions`；可解析 URL、Markdown、JSON、SSE。支持视频 URL（返回 `{type:'video', url:...}`），但不支持直接发送 base64 视频。 |
-| `siliconflow` | 是 | 图片 bytes 或错误字符串 | 通用 `/images/generations`；解析字段为 `images[0].url`。可携带最多 3 张输入图。 |
-| `bigmodel` | 是 | 图片 bytes 或错误字符串 | 通用 `/images/generations`；解析字段为 `data[0].url`。 |
+| `gemini` | 是 | 图片 bytes / 图片列表 / 错误字符串 | 支持 `image_size=智能匹配`（从 prompt 里提取 1K/2K/4K）；支持 google_search(仅 gemini-3)。对反代/SSE/噪声响应有兼容解析。 |
+| `vertex_ai` | 是 | 图片 bytes / 图片列表 / 错误字符串 | 官方 Vertex AI；请求体更“轻”，不含 image_size/google_search 等扩展字段。 |
+| `openai_responses` | 是 | 图片 bytes / 图片列表 / 错误字符串 | 兼容 `/v1/responses` 端点，获取并解析 base64 图片。 |
+| `openai_compat_chat` | 是 | 图片 bytes / 图片列表 / 视频 dict / 错误字符串 | 兼容 `/v1/chat/completions`；可解析 URL、Markdown、JSON、SSE。支持视频 URL（返回 `{type:'video', url:...}`），但不支持直接发送 base64 视频。 |
+| `siliconflow` | 是 | 图片 bytes / 图片列表 / 错误字符串 | 通用 `/images/generations`；可解析多个返回图片 URL。可携带最多 3 张输入图。 |
+| `bigmodel` | 是 | 图片 bytes / 图片列表 / 错误字符串 | 通用 `/images/generations`；可解析多个返回图片 URL。 |
 
 <details>
 <summary>点击展开：提供商详细介绍</summary>

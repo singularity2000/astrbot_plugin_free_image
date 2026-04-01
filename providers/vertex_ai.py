@@ -9,7 +9,9 @@ from .base import BaseProvider
 class VertexAIProvider(BaseProvider):
     """Vertex AI 官方 API（/v1/publishers/google/models/{model}:generateContent）。"""
 
-    async def generate(self, image_bytes_list: list[bytes], prompt: str) -> bytes | str:
+    async def generate(
+        self, image_bytes_list: list[bytes], prompt: str
+    ) -> bytes | list[bytes] | str:
         api_url = self.node.get("api_url")
         model_name = self.node.get("model", "gemini-3.1-flash-image-preview")
         if not api_url:
@@ -85,12 +87,16 @@ class VertexAIProvider(BaseProvider):
             "generationConfig": {"responseModalities": ["IMAGE"]},
         }
 
-    def _extract_image_or_error(self, data: dict[str, Any]) -> bytes | str | None:
-        """返回 bytes=成功；str=终止错误；None=未取到图片。"""
+    def _extract_image_or_error(
+        self, data: dict[str, Any]
+    ) -> bytes | list[bytes] | str | None:
+        """返回 bytes/list[bytes]=成功；str=终止错误；None=未取到图片。"""
         prompt_feedback = data.get("promptFeedback", {})
         if isinstance(prompt_feedback, dict) and prompt_feedback.get("blockReason"):
             reason = prompt_feedback.get("blockReason", "未知")
             return f"请求被内容安全系统拦截: {reason}"
+
+        image_results: list[bytes] = []
 
         for candidate in data.get("candidates", []):
             finish_reason = candidate.get("finishReason", "")
@@ -105,6 +111,11 @@ class VertexAIProvider(BaseProvider):
                 if inline_data and inline_data.get("data"):
                     img_b64 = inline_data["data"]
                     logger.info(f"[VertexAI] 成功提取图片数据 ({len(img_b64)} chars)")
-                    return base64.b64decode(img_b64)
+                    image_results.append(base64.b64decode(img_b64))
+
+        if len(image_results) == 1:
+            return image_results[0]
+        if image_results:
+            return image_results
 
         return None

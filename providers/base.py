@@ -101,10 +101,10 @@ class BaseProvider(ABC):
     @abstractmethod
     async def generate(
         self, image_bytes_list: List[bytes], prompt: str
-    ) -> Union[bytes, str, dict[str, str]]:
+    ) -> Union[bytes, list[bytes], str, dict[str, str]]:
         """
         执行生图调用。
-        返回 bytes 表示成功（图片数据），返回 dict 表示成功的其他媒体，返回 str 表示失败（错误信息）。
+        返回 bytes / list[bytes] 表示图片成功，返回 dict 表示成功的其他媒体，返回 str 表示失败（错误信息）。
         """
         ...
 

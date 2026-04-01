@@ -83,9 +83,10 @@ class OpenAICompatChatProvider(BaseProvider):
 
     def _extract_from_text(
         self, text: str
-    ) -> tuple[bytes | None, str | dict[str, str] | None]:
+    ) -> tuple[list[bytes], str | dict[str, str] | None]:
+        images: list[bytes] = []
         if not text:
-            return None, None
+            return images, None
 
         markdown_match = self.MARKDOWN_IMAGE_RE.search(text)
         if markdown_match:
@@ -93,8 +94,8 @@ class OpenAICompatChatProvider(BaseProvider):
             if candidate.startswith("data:"):
                 return self._extract_from_data_uri(candidate)
             if self._is_video_url(candidate):
-                return None, {"type": "video", "url": candidate}
-            return None, candidate
+                return images, {"type": "video", "url": candidate}
+            return images, candidate
 
         data_match = self.DATA_URI_RE.search(text)
         if data_match:
@@ -103,39 +104,42 @@ class OpenAICompatChatProvider(BaseProvider):
             if raw:
                 if media_type == "video":
                     return (
-                        None,
+                        images,
                         "接口返回了 base64 视频数据，当前插件暂不支持直接发送内嵌视频数据",
                     )
-                return raw, None
+                images.append(raw)
+                return images, None
 
         for url in self.IMAGE_URL_RE.findall(text):
             cleaned = url.rstrip(").,;\"'")
             if self._is_video_url(cleaned):
-                return None, {"type": "video", "url": cleaned}
-            return None, cleaned
+                return images, {"type": "video", "url": cleaned}
+            return images, cleaned
 
-        return None, None
+        return images, None
 
     def _extract_from_data_uri(
         self, uri: str
-    ) -> tuple[bytes | None, str | dict[str, str] | None]:
+    ) -> tuple[list[bytes], str | dict[str, str] | None]:
+        images: list[bytes] = []
         match = self.DATA_URI_RE.search(uri)
         if not match:
-            return None, None
+            return images, None
         media_type = match.group(1).lower()
         raw = self._decode_base64_payload(match.group(3))
         if not raw:
-            return None, "接口返回了无效的 base64 数据"
+            return images, "接口返回了无效的 base64 数据"
         if media_type == "video":
             return (
-                None,
+                images,
                 "接口返回了 base64 视频数据，当前插件暂不支持直接发送内嵌视频数据",
             )
-        return raw, None
+        images.append(raw)
+        return images, None
 
     def _extract_from_message(
         self, message: dict[str, Any]
-    ) -> tuple[bytes | None, str | dict[str, str] | None]:
+    ) -> tuple[list[bytes], str | dict[str, str] | None]:
         content = message.get("content", "")
 
         if isinstance(content, str):
@@ -143,6 +147,7 @@ class OpenAICompatChatProvider(BaseProvider):
 
         if isinstance(content, list):
             text_parts: list[str] = []
+            images: list[bytes] = []
             for part in content:
                 if not isinstance(part, dict):
                     continue
@@ -154,40 +159,52 @@ class OpenAICompatChatProvider(BaseProvider):
                     if isinstance(image_url, dict):
                         url = str(image_url.get("url", "")).strip()
                         if url.startswith("data:"):
-                            raw, err = self._extract_from_data_uri(url)
-                            if raw or err:
-                                return raw, err
+                            raws, err = self._extract_from_data_uri(url)
+                            if raws:
+                                images.extend(raws)
+                            if err:
+                                return images, err
                         elif url:
                             return (
-                                (None, {"type": "video", "url": url})
+                                (images, {"type": "video", "url": url})
                                 if self._is_video_url(url)
-                                else (None, url)
+                                else (images, url)
                             )
                 elif part_type == "output_text":
                     text_parts.append(str(part.get("text", "")))
 
-            return self._extract_from_text("\n".join(p for p in text_parts if p))
+            text_images, result = self._extract_from_text(
+                "\n".join(p for p in text_parts if p)
+            )
+            if text_images:
+                images.extend(text_images)
+            return images, result
 
-        return None, None
+        return [], None
 
     def _extract_from_json_response(
         self, payload: dict[str, Any]
-    ) -> tuple[bytes | None, str | dict[str, str] | None]:
+    ) -> tuple[list[bytes], str | dict[str, str] | None]:
+        images: list[bytes] = []
         choices = payload.get("choices") or []
         for choice in choices:
             if not isinstance(choice, dict):
                 continue
             message = choice.get("message") or {}
             if isinstance(message, dict):
-                raw, result = self._extract_from_message(message)
-                if raw or result:
-                    return raw, result
+                raws, result = self._extract_from_message(message)
+                if raws:
+                    images.extend(raws)
+                if result:
+                    return images, result
 
             delta = choice.get("delta") or {}
             if isinstance(delta, dict):
-                raw, result = self._extract_from_message(delta)
-                if raw or result:
-                    return raw, result
+                raws, result = self._extract_from_message(delta)
+                if raws:
+                    images.extend(raws)
+                if result:
+                    return images, result
 
         data_items = payload.get("data") or []
         if isinstance(data_items, list):
@@ -197,25 +214,28 @@ class OpenAICompatChatProvider(BaseProvider):
                 if item.get("b64_json"):
                     raw = self._decode_base64_payload(str(item["b64_json"]))
                     if raw:
-                        return raw, None
+                        images.append(raw)
                 if item.get("url"):
                     url = str(item["url"]).strip()
                     if self._is_video_url(url):
-                        return None, {"type": "video", "url": url}
-                    return None, url
+                        return images, {"type": "video", "url": url}
+                    return images, url
 
         for key in ("output_text", "text", "response"):
             value = payload.get(key)
             if isinstance(value, str):
-                raw, result = self._extract_from_text(value)
-                if raw or result:
-                    return raw, result
+                raws, result = self._extract_from_text(value)
+                if raws:
+                    images.extend(raws)
+                if result:
+                    return images, result
 
-        return None, None
+        return images, None
 
     def _extract_from_sse_response(
         self, response_text: str
-    ) -> tuple[bytes | None, str | dict[str, str] | None]:
+    ) -> tuple[list[bytes], str | dict[str, str] | None]:
+        images: list[bytes] = []
         text_fragments: list[str] = []
         for line in response_text.strip().splitlines():
             if not line.startswith("data: "):
@@ -228,9 +248,11 @@ class OpenAICompatChatProvider(BaseProvider):
             except Exception:
                 continue
 
-            raw, result = self._extract_from_json_response(chunk)
-            if raw or result:
-                return raw, result
+            raws, result = self._extract_from_json_response(chunk)
+            if raws:
+                images.extend(raws)
+            if result:
+                return images, result
 
             for choice in chunk.get("choices", []):
                 if not isinstance(choice, dict):
@@ -245,11 +267,14 @@ class OpenAICompatChatProvider(BaseProvider):
                             if isinstance(part, dict) and part.get("type") == "text":
                                 text_fragments.append(str(part.get("text", "")))
 
-        return self._extract_from_text("".join(text_fragments))
+        text_images, result = self._extract_from_text("".join(text_fragments))
+        if text_images:
+            images.extend(text_images)
+        return images, result
 
     async def generate(
         self, image_bytes_list: List[bytes], prompt: str
-    ) -> Union[bytes, str, dict[str, str]]:
+    ) -> Union[bytes, list[bytes], str, dict[str, str]]:
         api_url = self.node.get("api_url")
         model_name = self.node.get("model")
         if not api_url:
@@ -301,27 +326,29 @@ class OpenAICompatChatProvider(BaseProvider):
                         )
                     else:
                         response_text = await resp.text()
-                        raw_data: bytes | None = None
+                        raw_data_list: list[bytes] = []
                         result: str | dict[str, str] | None = None
 
                         if "data: " in response_text:
-                            raw_data, result = self._extract_from_sse_response(
+                            raw_data_list, result = self._extract_from_sse_response(
                                 response_text
                             )
 
-                        if not raw_data and not result:
+                        if not raw_data_list and not result:
                             try:
                                 response_json = json.loads(response_text)
-                                raw_data, result = self._extract_from_json_response(
-                                    response_json
+                                raw_data_list, result = (
+                                    self._extract_from_json_response(response_json)
                                 )
                             except json.JSONDecodeError:
-                                raw_data, result = self._extract_from_text(
+                                raw_data_list, result = self._extract_from_text(
                                     response_text
                                 )
 
-                        if raw_data:
-                            return raw_data
+                        if len(raw_data_list) == 1:
+                            return raw_data_list[0]
+                        if raw_data_list:
+                            return raw_data_list
 
                         if result:
                             if isinstance(result, dict):
