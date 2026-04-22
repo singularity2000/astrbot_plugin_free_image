@@ -163,6 +163,8 @@ class ImageGenerationPlugin(Star):
     @filter.command("文生图", prefix_optional=True)
     async def on_text_to_image_request(self, event: AstrMessageEvent):
         prompt = event.message_str.strip()
+        if prompt.startswith("文生图"):
+            prompt = prompt.removeprefix("文生图").strip()
         if not prompt:
             yield event.plain_result("请提供文生图的描述。用法: #文生图 <描述>")
             return
