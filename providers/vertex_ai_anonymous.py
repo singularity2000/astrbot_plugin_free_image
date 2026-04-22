@@ -218,78 +218,82 @@ class VertexAIAnonymousProvider(BaseProvider):
             if not token:
                 current_iter_err = "获取 recaptcha token 失败"
 
-            if not current_iter_err:
-                body["variables"]["recaptchaToken"] = token
-                api_url = self._build_api_url(vertex_base)
+            # --- 原子化 FVA 微重试逻辑 ---
+            for fva_retry in range(1, 6):
+                if not current_iter_err:
+                    body["variables"]["recaptchaToken"] = token
+                    api_url = self._build_api_url(vertex_base)
 
-                # 执行生图请求 (使用 curl_cffi)
-                # 每次请求尝试都计数（触发老化机制），放在开头确保只计一次
-                async with self._session_lock:
-                    self.request_count += 1
-                try:
-                    headers = {
-                        "referer": "https://console.cloud.google.com/vertex-ai",
-                        "Content-Type": "application/json",
-                        "Origin": "https://console.cloud.google.com",
-                    }
-                    session = await self._acquire_curl_session()
-                    if not session:
-                        raise RuntimeError("无法创建 curl_cffi 会话")
-
+                    # 执行生图请求 (使用 curl_cffi)
+                    async with self._session_lock:
+                        self.request_count += 1
                     try:
-                        resp = await session.post(
-                            api_url, json=body, headers=headers, timeout=api_timeout
-                        )
-                    finally:
-                        await self._release_curl_session(session)
+                        headers = {
+                            "referer": "https://console.cloud.google.com/vertex-ai",
+                            "Content-Type": "application/json",
+                            "Origin": "https://console.cloud.google.com",
+                        }
+                        session = await self._acquire_curl_session()
+                        if not session:
+                            raise RuntimeError("无法创建 curl_cffi 会话")
 
-                    if resp.status_code != 200:
-                        error_status_code = 8 if resp.status_code == 429 else None
-                        current_iter_err = f"API请求失败 (HTTP {resp.status_code})"
-                        if resp.status_code != 429:
-                            await self.close()
-                            self.request_count = 0  # 被动轮换后重置计数
-                    else:
-                        result = resp.json()
-                        parsed = self._parse_result(result)
-                        if parsed:
-                            error_status_code = parsed["status_code"]
-                            if parsed["image_data"]:
-                                image_data = parsed["image_data"]
-                                if isinstance(image_data, list):
-                                    return [
-                                        base64.b64decode(item) for item in image_data
-                                    ]
-                                return base64.b64decode(image_data)
-                            if parsed["safety_blocked"]:
-                                return parsed["last_err"]
-                            current_iter_err = parsed["last_err"]
-                except Exception as e:
-                    current_iter_err = f"Vertex AI 请求异常: {str(e)}"
-                    await self.close()
-                    self.request_count = 0  # 被动轮换后重置计数
+                        try:
+                            resp = await session.post(
+                                api_url, json=body, headers=headers, timeout=api_timeout
+                            )
+                        finally:
+                            await self._release_curl_session(session)
+
+                        if resp.status_code != 200:
+                            error_status_code = 8 if resp.status_code == 429 else None
+                            current_iter_err = f"API请求失败 (HTTP {resp.status_code})"
+                            if resp.status_code != 429:
+                                await self.close()
+                                self.request_count = 0  # 被动轮换后重置计数
+                        else:
+                            result = resp.json()
+                            parsed = self._parse_result(result)
+                            if parsed:
+                                error_status_code = parsed["status_code"]
+                                if parsed["image_data"]:
+                                    image_data = parsed["image_data"]
+                                    if isinstance(image_data, list):
+                                        return [
+                                            base64.b64decode(item)
+                                            for item in image_data
+                                        ]
+                                    return base64.b64decode(image_data)
+                                if parsed["safety_blocked"]:
+                                    return parsed["last_err"]
+                                current_iter_err = parsed["last_err"]
+                    except Exception as e:
+                        current_iter_err = f"Vertex AI 请求异常: {str(e)}"
+                        await self.close()
+                        self.request_count = 0  # 被动轮换后重置计数
+
+                # 检查是否命中 FVA 微重试条件
+                if (
+                    error_status_code == 3
+                    and current_iter_err
+                    and "Failed to verify action" in current_iter_err
+                    and fva_retry < 5
+                ):
+                    logger.info(
+                        f"[VertexAI] 命中 Failed to verify action ({fva_retry}/5)，复用同一 token 2.00s 后重试"
+                    )
+                    # 抵消本次请求对老化计数的影响
+                    async with self._session_lock:
+                        self.request_count -= 1
+                    await asyncio.sleep(2.0)
+                    current_iter_err = None
+                    error_status_code = None
+                    continue  # 继续微重试
+
+                break  # 非 FVA 或达到上限，跳出
 
             # --- 统一错误处理与重试逻辑 ---
             if current_iter_err:
                 last_err = current_iter_err
-
-            # 处理 reCAPTCHA 验证失败 (FVA)
-            if (
-                error_status_code == 3
-                and "Failed to verify action" in last_err
-                and captcha_try_count < 1
-            ):
-                # FVA 复用 token 不算新尝试，减回去
-                async with self._session_lock:
-                    self.request_count -= 1
-                captcha_try_count += 1
-                next_delay = 2.0
-                logger.info(
-                    f"[VertexAI] 命中 Failed to verify action，复用同一 token {next_delay:.2f}s 后重试一次"
-                )
-                attempt -= 1
-                error_status_code = None
-                continue
 
             # 处理其他需要退避的重试
             if attempt < self.max_retry:
@@ -300,7 +304,7 @@ class VertexAIAnonymousProvider(BaseProvider):
 
                 log_msg = f"Vertex AI API 调用失败，重试 ({attempt}/{self.max_retry}): {last_err}，{next_delay:.2f}s 后重试"
                 if error_status_code == 8:
-                    logger.warning(f"Vertex AI 429 Limited. {log_msg}")
+                    logger.warning(f"{log_msg} (429 Limited)")
                 else:
                     logger.warning(log_msg)
             else:

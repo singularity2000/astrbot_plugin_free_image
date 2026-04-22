@@ -50,10 +50,11 @@ class ImageGenPipeline:
 
     async def execute(
         self, image_bytes_list: List[bytes], prompt: str
-    ) -> Union[bytes, list[bytes], str, dict[str, str]]:
+    ) -> tuple[Union[bytes, list[bytes], str, dict[str, str]], Optional[str]]:
         """
         依次调用管线中已启用的 Provider。
-        返回 bytes / list[bytes] / dict 表示成功媒体结果，返回 str 表示全部失败（汇总错误信息）。
+        返回 (result, model_name)。
+        其中 result 为 bytes / list[bytes] / dict 表示成功媒体结果，str 表示全部失败（汇总错误信息）。
         """
         errors: List[str] = []
         for provider in self.providers:
@@ -62,13 +63,17 @@ class ImageGenPipeline:
             logger.info(f"[Pipeline] 尝试: {provider.name}")
             result = await provider.generate(image_bytes_list, prompt)
             if isinstance(result, (bytes, list, dict)):
-                return result
+                model_name = provider.node.get("model")
+                return result, str(model_name) if model_name else None
             logger.warning(f"[Pipeline] {provider.name} 失败: {result}")
             errors.append(f"{provider.name}: {result}")
 
         if not errors:
-            return "API 管线为空或无已启用的提供商，请在配置页面添加至少一个 API 节点。"
-        return "所有 API 均失败:\n" + "\n".join(errors)
+            return (
+                "API 管线为空或无已启用的提供商，请在配置页面添加至少一个 API 节点。",
+                None,
+            )
+        return "所有 API 均失败:\n" + "\n".join(errors), None
 
     def get_first_keyed_provider(self) -> Optional[BaseProvider]:
         """找到管线中第一个拥有 api_keys 配置的 Provider（供 Key 管理命令使用）。"""

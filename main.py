@@ -209,6 +209,7 @@ class ImageGenerationPlugin(Star):
         is_master: bool,
         sender_id: str,
         group_id: str,
+        model_name: str | None = None,
     ) -> str:
         caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)"]
         if is_i2i:
@@ -225,6 +226,9 @@ class ImageGenerationPlugin(Star):
                 caption_parts.append(
                     f"本群剩余次数: {self.persistence.get_group_count(group_id)}"
                 )
+
+        if model_name:
+            caption_parts.append(f"模型: {model_name}")
 
         return " | ".join(caption_parts)
 
@@ -267,7 +271,6 @@ class ImageGenerationPlugin(Star):
         reply_component = Reply(id=event.message_obj.message_id)
 
         if concise_mode:
-            logger.info(caption_text)
             if split_images:
                 for img in images:
                     chain = [Image.fromBytes(img)]
@@ -393,7 +396,7 @@ class ImageGenerationPlugin(Star):
 
         # --- API 调用 ---
         start_time = datetime.now()
-        res = await self.pipeline.execute(images_to_process, prompt)
+        res, model_name = await self.pipeline.execute(images_to_process, prompt)
         elapsed = (datetime.now() - start_time).total_seconds()
 
         image_results = self._normalize_image_results(res)
@@ -405,7 +408,9 @@ class ImageGenerationPlugin(Star):
                 is_master=is_master,
                 sender_id=sender_id,
                 group_id=group_id,
+                model_name=model_name,
             )
+            logger.info(caption_text)
             async for msg in self._yield_success_images(
                 event=event,
                 images=image_results,
@@ -431,10 +436,13 @@ class ImageGenerationPlugin(Star):
                         f"本群剩余次数: {self.persistence.get_group_count(group_id)}"
                     )
 
+            if model_name:
+                caption_parts.append(f"模型: {model_name}")
+
             caption_text = " | ".join(caption_parts)
             video_component = Video.fromURL(url=res["url"])
+            logger.info(caption_text)
             if concise_mode:
-                logger.info(caption_text)
                 yield event.chain_result(
                     [Reply(id=event.message_obj.message_id), video_component]
                 )
