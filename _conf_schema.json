@@ -171,9 +171,9 @@
                     }
                 }
             },
-            "vertex_ai": {
-                "name": "Vertex AI 官方",
-                "hint": "Google Vertex AI 官方端点（publishers/google/models）。使用 API Key 调用，可作为 Gemini 的并列备用节点。",
+            "openai_images": {
+                "name": "OpenAI Images 官方",
+                "hint": "OpenAI 官方 Images API。无输入图走 /images/generations，有输入图走 /images/edits。",
                 "items": {
                     "enabled": {
                         "description": "启用此节点",
@@ -184,21 +184,20 @@
                     "api_url": {
                         "description": "API 地址",
                         "type": "string",
-                        "default": "https://aiplatform.googleapis.com/v1/publishers/google/models",
-                        "hint": "Vertex AI 官方基础地址。通常无需修改，可替换为兼容中转地址。"
+                        "default": "https://api.openai.com/v1/images",
+                        "hint": "OpenAI Images 基础地址。插件会自动拼接 /generations 或 /edits。"
                     },
                     "model": {
                         "description": "模型名称",
                         "type": "string",
-                        "default": "gemini-3.1-flash-image-preview",
-                        "hint": "Vertex AI 上使用的图片生成模型名称"
+                        "default": "gpt-image-2",
+                        "hint": "OpenAI Images 模型名称，例如 gpt-image-2。"
                     },
                     "api_keys": {
                         "description": "API 密钥列表",
                         "type": "list",
                         "default": [],
-                        "obvious_hint": true,
-                        "hint": "填写 Vertex AI / Google Cloud 可用的 API Key，可填写多个自动轮换",
+                        "hint": "OpenAI API Key，可填写多个自动轮换，不需要填写 Bearer 前缀。",
                         "items": { "type": "string", "description": "API 密钥" }
                     },
                     "proxy": {

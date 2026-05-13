@@ -178,7 +178,7 @@
 | :--- | :--- | :--- | :--- |
 | `vertex_ai_anonymous` | 否 | 图片 bytes 或错误字符串 | 逆向匿名；依赖 `curl_cffi`；内置 reCAPTCHA 处理、指纹轮换、会话老化。 |
 | `gemini` | 是 | 图片 bytes / 图片列表 / 错误字符串 | 支持 `image_size=智能匹配`（从 prompt 里提取 1K/2K/4K）；支持 google_search(仅 gemini-3)。对反代/SSE/噪声响应有兼容解析。 |
-| `vertex_ai` | 是 | 图片 bytes / 图片列表 / 错误字符串 | 官方 Vertex AI；请求体更“轻”，不含 image_size/google_search 等扩展字段。 |
+| `openai_images` | 是 | 图片 bytes / 图片列表 / 错误字符串 | OpenAI 官方 Images API；无输入图走 `/images/generations`，有输入图走 `/images/edits`。 |
 | `openai_responses` | 是 | 图片 bytes / 图片列表 / 错误字符串 | 兼容 `/v1/responses` 端点，获取并解析 base64 图片。 |
 | `openai_compat_chat` | 是 | 图片 bytes / 图片列表 / 视频 dict / 错误字符串 | 兼容 `/v1/chat/completions`；可解析 URL、Markdown、JSON、SSE。支持视频 URL（返回 `{type:'video', url:...}`），但不支持直接发送 base64 视频。 |
 | `siliconflow` | 是 | 图片 bytes / 图片列表 / 错误字符串 | 通用 `/images/generations`；可解析多个返回图片 URL。可携带最多 3 张输入图。 |
@@ -205,11 +205,13 @@
 - `image_size=智能匹配`：会从 prompt 里匹配 `1K/2K/4K`，否则默认 `1K`。
 - `google_search`：仅在模型名包含 `gemini-3` 时生效（会在请求体加入 `tools: [{google_search:{}}]`）。
 
-### 3) VertexAIProvider（官方 Vertex AI）
+### 3) OpenAIImagesProvider（OpenAI 官方 Images API）
 
-- 端点形式：`{api_url}/{model}:generateContent?key={api_key}`
-- 返回解析与 Gemini 类似：读取 `candidates[].content.parts[].inlineData.data`。
-- 相比 GeminiProvider：请求体更精简（不包含 image_size/google_search/system_prompt 等扩展字段）。
+- 端点形式：基础地址填写为 `https://api.openai.com/v1/images`。
+- 无输入图片时自动请求 `/generations`，用于文生图。
+- 有输入图片时自动请求 `/edits`，用于图生图。
+- 图生图上传前会把输入图片归一化为 JPEG，提高 OpenAI Images API 的兼容性。
+- 返回解析优先读取 `data[].b64_json`，也兼容下载 `data[].url`。
 
 ### 4) VertexAIAnonymousProvider（逆向匿名）
 
