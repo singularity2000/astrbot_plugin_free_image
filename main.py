@@ -84,6 +84,103 @@ class ImageGenerationPlugin(Star):
                 logger.warning(f"跳过格式错误的 prompt: {item}")
         logger.info(f"加载了 {len(self.prompt_map)} 个 prompts。")
 
+    def _admin_denied_message(self) -> str:
+        return "你没有权限使用此命令。"
+
+    def _get_api_pipeline_config(self) -> list:
+        pipeline_config = self.conf.get("api_pipeline", [])
+        return pipeline_config if isinstance(pipeline_config, list) else []
+
+    def _get_model_display_name(self, node: dict) -> str:
+        model_name = str(node.get("model", "")).strip()
+        if model_name:
+            return model_name
+        template_key = str(node.get("__template_key", "")).strip()
+        return template_key or "未命名模型"
+
+    def _format_model_pipeline_message(self, prefix: str = "") -> str:
+        pipeline_config = self._get_api_pipeline_config()
+        lines = []
+        if prefix:
+            lines.append(prefix)
+        lines.append("当前模型回退顺序为：")
+        lines.append("")
+
+        if pipeline_config:
+            for index, node in enumerate(pipeline_config, start=1):
+                status = "🟢" if node.get("enabled", True) else "🔴"
+                lines.append(f"{index}. {status} {self._get_model_display_name(node)}")
+        else:
+            lines.append("当前 API 管线为空，请先在 WebUI 配置 api_pipeline。")
+
+        lines.extend(
+            [
+                "",
+                "画图模型 置顶 <序号> 将该模型置顶到管线顶部",
+                "画图模型 开启/关闭 <序号> 将该模型启用或关闭",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _parse_model_command(self, raw_args: str) -> tuple[str | None, int | None]:
+        if not raw_args:
+            return None, None
+        parts = raw_args.split()
+        if len(parts) != 2:
+            return "", None
+        action, index_text = parts
+        if action not in {"置顶", "开启", "关闭"} or not index_text.isdigit():
+            return "", None
+        return action, int(index_text)
+
+    def _save_and_rebuild_pipeline(self) -> None:
+        self.conf["api_pipeline"] = self._get_api_pipeline_config()
+        self.conf.save_config()
+        if self.pipeline:
+            self.pipeline.build(self.conf.get("api_pipeline", []))
+
+    async def _yield_model_pipeline_error(self, event: AstrMessageEvent):
+        yield event.plain_result(
+            self._format_model_pipeline_message("命令格式或参数错误，请重试。")
+        )
+        event.stop_event()
+
+    async def _handle_model_pipeline_command(self, event: AstrMessageEvent, raw_args: str):
+        if not self.is_global_admin(event):
+            yield event.plain_result(self._admin_denied_message())
+            event.stop_event()
+            return
+
+        action, index = self._parse_model_command(raw_args)
+        pipeline_config = self._get_api_pipeline_config()
+        if action is None:
+            yield event.plain_result(self._format_model_pipeline_message())
+            event.stop_event()
+            return
+        if not action or index is None or index < 1 or index > len(pipeline_config):
+            async for result in self._yield_model_pipeline_error(event):
+                yield result
+            return
+
+        node_index = index - 1
+        if action == "置顶":
+            node = pipeline_config.pop(node_index)
+            pipeline_config.insert(0, node)
+        elif action == "开启":
+            pipeline_config[node_index]["enabled"] = True
+        elif action == "关闭":
+            pipeline_config[node_index]["enabled"] = False
+        else:
+            async for result in self._yield_model_pipeline_error(event):
+                yield result
+            return
+
+        self._save_and_rebuild_pipeline()
+        yield event.plain_result(
+            self._format_model_pipeline_message("操作成功。")
+        )
+        event.stop_event()
+
     @filter.llm_tool(name="image_generation")
     async def image_generation(self, event: AstrMessageEvent, prompt: str):
         """专业的文生图、图生图工具。理解用户语义，仅当用户需要你生图，或修改图片内容时才调用此工具。
@@ -126,6 +223,14 @@ class ImageGenerationPlugin(Star):
             return
         text = event.message_str.strip()
         if not text:
+            return
+        if text.startswith("画图模型") and not (
+            text == "画图模型" or text.startswith("画图模型 ")
+        ):
+            async for result in self._handle_model_pipeline_command(
+                event, text.removeprefix("画图模型").strip()
+            ):
+                yield result
             return
         parts = text.split(maxsplit=1)
         cmd = parts[0].strip()
@@ -456,6 +561,8 @@ class ImageGenerationPlugin(Star):
     @filter.command("画图添加模板", aliases={"lma", "lm添加"}, prefix_optional=True)
     async def add_lm_prompt(self, event: AstrMessageEvent):
         if not self.is_global_admin(event):
+            yield event.plain_result(self._admin_denied_message())
+            event.stop_event()
             return
         raw = event.message_str.strip()
         # 移除命令名本身（支持别名）
@@ -467,6 +574,7 @@ class ImageGenerationPlugin(Star):
             yield event.plain_result(
                 "格式错误, 正确示例:\n#画图添加模板 姿势表:为这幅图创建一个姿势表, 摆出各种姿势"
             )
+            event.stop_event()
             return
 
         key, new_value = map(str.strip, raw.split(":", 1))
@@ -484,6 +592,15 @@ class ImageGenerationPlugin(Star):
         self.conf.save_config()
         await self._load_prompt_map()
         yield event.plain_result(f"已保存生图提示语模板:\n{key}:{new_value}")
+        event.stop_event()
+
+    @filter.command("画图模型", prefix_optional=True)
+    async def on_model_pipeline_command(self, event: AstrMessageEvent):
+        raw = event.message_str.strip()
+        if raw.startswith("画图模型"):
+            raw = raw.removeprefix("画图模型").strip()
+        async for result in self._handle_model_pipeline_command(event, raw):
+            yield result
 
     @filter.command("画图帮助", aliases={"lmh", "lm帮助"}, prefix_optional=True)
     async def on_prompt_help(self, event: AstrMessageEvent):
@@ -545,6 +662,8 @@ class ImageGenerationPlugin(Star):
     @filter.command("画图增加用户次数", prefix_optional=True)
     async def on_add_user_counts(self, event: AstrMessageEvent):
         if not self.is_global_admin(event):
+            yield event.plain_result(self._admin_denied_message())
+            event.stop_event()
             return
         cmd_text = event.message_str.strip()
         at_seg = next((s for s in event.message_obj.message if isinstance(s, At)), None)
@@ -562,6 +681,7 @@ class ImageGenerationPlugin(Star):
             yield event.plain_result(
                 "格式错误:\n#画图增加用户次数 @用户 <次数>\n或 #画图增加用户次数 <QQ号> <次数>"
             )
+            event.stop_event()
             return
 
         # 管理员增加的是永久次数
@@ -572,14 +692,18 @@ class ImageGenerationPlugin(Star):
         yield event.plain_result(
             f"✅ 已为用户 {target_qq} 增加 {count} 次（永久），TA当前总剩余 {new_total_count} 次。"
         )
+        event.stop_event()
 
     @filter.command("画图增加群组次数", prefix_optional=True)
     async def on_add_group_counts(self, event: AstrMessageEvent):
         if not self.is_global_admin(event):
+            yield event.plain_result(self._admin_denied_message())
+            event.stop_event()
             return
         match = re.search(r"(\d+)\s+(\d+)", event.message_str.strip())
         if not match:
             yield event.plain_result("格式错误: #画图增加群组次数 <群号> <次数>")
+            event.stop_event()
             return
         target_group, count = match.group(1), int(match.group(2))
 
@@ -591,6 +715,7 @@ class ImageGenerationPlugin(Star):
         yield event.plain_result(
             f"✅ 已为群组 {target_group} 增加 {count} 次（永久），该群当前总剩余 {new_total_count} 次。"
         )
+        event.stop_event()
 
     @filter.command("画图查询次数", prefix_optional=True)
     async def on_query_counts(self, event: AstrMessageEvent):
@@ -618,16 +743,20 @@ class ImageGenerationPlugin(Star):
     @filter.command("画图添加key", prefix_optional=True)
     async def on_add_key(self, event: AstrMessageEvent):
         if not self.is_global_admin(event):
+            yield event.plain_result(self._admin_denied_message())
+            event.stop_event()
             return
         new_keys = event.message_str.strip().split()
         if not new_keys:
             yield event.plain_result("格式错误，请提供要添加的Key。")
+            event.stop_event()
             return
         provider = self.pipeline.get_first_keyed_provider() if self.pipeline else None
         if not provider:
             yield event.plain_result(
                 "❌ 管线中没有需要 API Key 的提供商。请在 WebUI 配置页面管理。"
             )
+            event.stop_event()
             return
         api_keys = provider.node.get("api_keys", [])
         added_keys = [key for key in new_keys if key not in api_keys]
@@ -639,32 +768,41 @@ class ImageGenerationPlugin(Star):
         yield event.plain_result(
             f"✅ 操作完成（{provider.name}），新增 {len(added_keys)} 个Key，当前共 {len(api_keys)} 个。"
         )
+        event.stop_event()
 
     @filter.command("画图key列表", prefix_optional=True)
     async def on_list_keys(self, event: AstrMessageEvent):
         if not self.is_global_admin(event):
+            yield event.plain_result(self._admin_denied_message())
+            event.stop_event()
             return
         provider = self.pipeline.get_first_keyed_provider() if self.pipeline else None
         if not provider:
             yield event.plain_result("📝 管线中没有需要 API Key 的提供商。")
+            event.stop_event()
             return
         api_keys = provider.node.get("api_keys", [])
         if not api_keys:
             yield event.plain_result("📝 暂未配置任何 API Key。")
+            event.stop_event()
             return
         key_list_str = "\n".join(
             f"{i + 1}. {key[:8]}...{key[-4:]}" for i, key in enumerate(api_keys)
         )
         yield event.plain_result(f"🔑 API Key 列表（{provider.name}）:\n{key_list_str}")
+        event.stop_event()
 
     @filter.command("画图删除key", prefix_optional=True)
     async def on_delete_key(self, event: AstrMessageEvent):
         if not self.is_global_admin(event):
+            yield event.plain_result(self._admin_denied_message())
+            event.stop_event()
             return
         param = event.message_str.strip()
         provider = self.pipeline.get_first_keyed_provider() if self.pipeline else None
         if not provider:
             yield event.plain_result("❌ 管线中没有需要 API Key 的提供商。")
+            event.stop_event()
             return
         api_keys = provider.node.get("api_keys", [])
         if param.lower() == "all":
@@ -680,6 +818,7 @@ class ImageGenerationPlugin(Star):
             yield event.plain_result(f"✅ 已删除 Key: {removed_key[:8]}...")
         else:
             yield event.plain_result("格式错误，请使用 #画图删除key <序号|all>")
+        event.stop_event()
 
     async def terminate(self):
         if self.iwf:
