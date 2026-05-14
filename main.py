@@ -9,6 +9,7 @@ from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.core import AstrBotConfig
 from astrbot.core.message.components import At, Image, Plain, Reply, Video
+from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 from .migration import migrate_legacy_config
@@ -145,6 +146,31 @@ class ImageGenerationPlugin(Star):
         )
         event.stop_event()
 
+    def _strip_wake_prefix(self, text: str) -> str:
+        wake_prefixes = self.context.get_config().get("wake_prefix", [])
+        if isinstance(wake_prefixes, str):
+            wake_prefixes = [wake_prefixes]
+        for prefix in sorted((p for p in wake_prefixes if p), key=len, reverse=True):
+            if text.startswith(prefix):
+                return text[len(prefix) :].strip()
+        return text
+
+    def _get_plain_message_text(
+        self, event: AstrMessageEvent, *, strip_wake_prefix: bool = False
+    ) -> str:
+        text = "".join(
+            seg.text for seg in event.message_obj.message if isinstance(seg, Plain)
+        ).strip()
+        if strip_wake_prefix:
+            return self._strip_wake_prefix(text)
+        return text
+
+    def _strip_command_prefix(self, text: str, command: str) -> str:
+        text = text.strip()
+        if text.startswith(command):
+            return text.removeprefix(command).strip()
+        return text
+
     async def _handle_model_pipeline_command(self, event: AstrMessageEvent, raw_args: str):
         if not self.is_global_admin(event):
             yield event.plain_result(self._admin_denied_message())
@@ -221,7 +247,7 @@ class ImageGenerationPlugin(Star):
     async def on_image_gen_request(self, event: AstrMessageEvent):
         if self.conf.get("prefix", True) and not event.is_at_or_wake_command:
             return
-        text = event.message_str.strip()
+        text = self._get_plain_message_text(event, strip_wake_prefix=True)
         if not text:
             return
         if text.startswith("画图模型") and not (
@@ -282,9 +308,9 @@ class ImageGenerationPlugin(Star):
 
     @filter.command("图生图", prefix_optional=True)
     async def on_image_to_image_request(self, event: AstrMessageEvent):
-        prompt = event.message_str.strip()
-        if prompt.startswith("图生图"):
-            prompt = prompt.removeprefix("图生图").strip()
+        prompt = self._strip_command_prefix(
+            self._get_plain_message_text(event, strip_wake_prefix=True), "图生图"
+        )
         if not prompt:
             yield event.plain_result(
                 "请提供图生图的描述。用法: #图生图 <描述>（并发送或引用图片）"
@@ -383,13 +409,17 @@ class ImageGenerationPlugin(Star):
                     chain = [Image.fromBytes(img)]
                     if quote_reply:
                         chain.insert(0, reply_component)
-                    yield event.chain_result(chain)
+                        yield event.chain_result(chain)
+                    else:
+                        await event.send(MessageChain(chain=chain))
                 return
 
             chain = [Image.fromBytes(img) for img in images]
             if quote_reply:
                 chain.insert(0, reply_component)
-            yield event.chain_result(chain)
+                yield event.chain_result(chain)
+            else:
+                await event.send(MessageChain(chain=chain))
             return
 
         if split_images:
@@ -398,7 +428,9 @@ class ImageGenerationPlugin(Star):
                 chain = [Image.fromBytes(img)]
                 if quote_reply:
                     chain.insert(0, reply_component)
-                yield event.chain_result(chain)
+                    yield event.chain_result(chain)
+                else:
+                    await event.send(MessageChain(chain=chain))
             return
 
         if quote_reply:
@@ -410,7 +442,7 @@ class ImageGenerationPlugin(Star):
 
         yield event.chain_result([reply_component, Plain(caption_text)])
         chain = [Image.fromBytes(img) for img in images]
-        yield event.chain_result(chain)
+        await event.send(MessageChain(chain=chain))
 
     async def handle_image_gen_logic(
         self,
@@ -739,86 +771,6 @@ class ImageGenerationPlugin(Star):
                 f"\n本群共享剩余次数为: {self.persistence.get_group_count(group_id)}"
             )
         yield event.plain_result(reply_msg)
-
-    @filter.command("画图添加key", prefix_optional=True)
-    async def on_add_key(self, event: AstrMessageEvent):
-        if not self.is_global_admin(event):
-            yield event.plain_result(self._admin_denied_message())
-            event.stop_event()
-            return
-        new_keys = event.message_str.strip().split()
-        if not new_keys:
-            yield event.plain_result("格式错误，请提供要添加的Key。")
-            event.stop_event()
-            return
-        provider = self.pipeline.get_first_keyed_provider() if self.pipeline else None
-        if not provider:
-            yield event.plain_result(
-                "❌ 管线中没有需要 API Key 的提供商。请在 WebUI 配置页面管理。"
-            )
-            event.stop_event()
-            return
-        api_keys = provider.node.get("api_keys", [])
-        added_keys = [key for key in new_keys if key not in api_keys]
-        api_keys.extend(added_keys)
-        provider.node["api_keys"] = api_keys
-        # 回写到持久化配置
-        self.conf["api_pipeline"] = self.conf.get("api_pipeline", [])
-        self.conf.save_config()
-        yield event.plain_result(
-            f"✅ 操作完成（{provider.name}），新增 {len(added_keys)} 个Key，当前共 {len(api_keys)} 个。"
-        )
-        event.stop_event()
-
-    @filter.command("画图key列表", prefix_optional=True)
-    async def on_list_keys(self, event: AstrMessageEvent):
-        if not self.is_global_admin(event):
-            yield event.plain_result(self._admin_denied_message())
-            event.stop_event()
-            return
-        provider = self.pipeline.get_first_keyed_provider() if self.pipeline else None
-        if not provider:
-            yield event.plain_result("📝 管线中没有需要 API Key 的提供商。")
-            event.stop_event()
-            return
-        api_keys = provider.node.get("api_keys", [])
-        if not api_keys:
-            yield event.plain_result("📝 暂未配置任何 API Key。")
-            event.stop_event()
-            return
-        key_list_str = "\n".join(
-            f"{i + 1}. {key[:8]}...{key[-4:]}" for i, key in enumerate(api_keys)
-        )
-        yield event.plain_result(f"🔑 API Key 列表（{provider.name}）:\n{key_list_str}")
-        event.stop_event()
-
-    @filter.command("画图删除key", prefix_optional=True)
-    async def on_delete_key(self, event: AstrMessageEvent):
-        if not self.is_global_admin(event):
-            yield event.plain_result(self._admin_denied_message())
-            event.stop_event()
-            return
-        param = event.message_str.strip()
-        provider = self.pipeline.get_first_keyed_provider() if self.pipeline else None
-        if not provider:
-            yield event.plain_result("❌ 管线中没有需要 API Key 的提供商。")
-            event.stop_event()
-            return
-        api_keys = provider.node.get("api_keys", [])
-        if param.lower() == "all":
-            provider.node["api_keys"] = []
-            self.conf["api_pipeline"] = self.conf.get("api_pipeline", [])
-            self.conf.save_config()
-            yield event.plain_result(f"✅ 已删除全部 {len(api_keys)} 个 Key。")
-        elif param.isdigit() and 1 <= int(param) <= len(api_keys):
-            removed_key = api_keys.pop(int(param) - 1)
-            provider.node["api_keys"] = api_keys
-            self.conf["api_pipeline"] = self.conf.get("api_pipeline", [])
-            self.conf.save_config()
-            yield event.plain_result(f"✅ 已删除 Key: {removed_key[:8]}...")
-        else:
-            yield event.plain_result("格式错误，请使用 #画图删除key <序号|all>")
-        event.stop_event()
 
     async def terminate(self):
         if self.iwf:

@@ -75,13 +75,6 @@ class ImageGenPipeline:
             )
         return "所有 API 均失败:\n" + "\n".join(errors), None
 
-    def get_first_keyed_provider(self) -> Optional[BaseProvider]:
-        """找到管线中第一个拥有 api_keys 配置的 Provider（供 Key 管理命令使用）。"""
-        for p in self.providers:
-            if p.enabled and "api_keys" in p.node:
-                return p
-        return None
-
     async def close(self):
         """关闭所有 Provider 的资源。"""
         for p in self.providers:

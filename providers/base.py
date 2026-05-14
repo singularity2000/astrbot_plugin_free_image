@@ -53,10 +53,6 @@ class BaseProvider(ABC):
             self.key_index = (self.key_index + 1) % len(keys)
             return key
 
-    def get_api_keys(self) -> list:
-        """返回此节点的 key 列表引用（供 main.py 管理命令使用）。"""
-        return self.node.get("api_keys", [])
-
     def _resource_exhausted_delay(self, attempt_no: int) -> float:
         """统一资源耗尽/429退避：2、4、8、16、16... + 0~3 秒抖动。"""
         return min(2**attempt_no, 16) + random.uniform(0, 3)
