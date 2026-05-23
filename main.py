@@ -12,7 +12,6 @@ from astrbot.core.message.components import At, Image, Plain, Reply, Video
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
-from .migration import migrate_legacy_config
 from .persistence import PersistenceManager
 from .pipeline import ImageGenPipeline
 from .workflow import ImageWorkflow
@@ -36,9 +35,6 @@ class ImageGenerationPlugin(Star):
 
     async def initialize(self):
         self.iwf = ImageWorkflow(self.conf)
-
-        # --- 向后兼容迁移：旧的单选配置 → 新的 api_pipeline ---
-        await migrate_legacy_config(self.conf)
 
         # --- 构建 Pipeline ---
         self.pipeline = ImageGenPipeline(self.conf, self.iwf)
@@ -73,12 +69,19 @@ class ImageGenerationPlugin(Star):
     async def _load_prompt_map(self):
         logger.info("正在加载 prompts...")
         self.prompt_map.clear()
+        seen_keys = set()
         prompt_list = self.conf.get("prompt_list", [])
         for item in prompt_list:
             try:
                 if ":" in item:
                     key, value = item.split(":", 1)
-                    self.prompt_map[key.strip()] = value.strip()
+                    key = key.strip()
+                    if key in seen_keys:
+                        logger.warning(
+                            f"检测到重复的预设指令“{key}”，配置中仅新增的模板将会生效。"
+                        )
+                    seen_keys.add(key)
+                    self.prompt_map[key] = value.strip()
                 else:
                     logger.warning(f"跳过格式错误的 prompt (缺少冒号): {item}")
             except ValueError:
@@ -110,7 +113,7 @@ class ImageGenerationPlugin(Star):
         if pipeline_config:
             for index, node in enumerate(pipeline_config, start=1):
                 status = "🟢" if node.get("enabled", True) else "🔴"
-                lines.append(f"{index}. {status} {self._get_model_display_name(node)}")
+                lines.append(f"{index}{status}{self._get_model_display_name(node)}")
         else:
             lines.append("当前 API 管线为空，请先在 WebUI 配置 api_pipeline。")
 
@@ -261,15 +264,11 @@ class ImageGenerationPlugin(Star):
         parts = text.split(maxsplit=1)
         cmd = parts[0].strip()
         extra_text = parts[1].strip() if len(parts) > 1 else ""
-        bnn_command = "图生图"
         user_prompt = ""
-        if cmd == bnn_command:
+        if cmd == "图生图":
             user_prompt = text.removeprefix(cmd).strip()
             if not user_prompt:
                 return
-            display_cmd = (
-                user_prompt[:10] + "..." if len(user_prompt) > 10 else user_prompt
-            )
             # 图生图命令交由专用 command 处理，避免重复触发
             return
         elif cmd in self.prompt_map:
@@ -588,6 +587,11 @@ class ImageGenerationPlugin(Star):
             else:
                 yield event.chain_result([video_component, Plain(caption_text)])
         else:
+            if concise_mode and str(res).startswith("所有 API 均失败"):
+                yield event.plain_result(
+                    f"❌ 生成失败 ({elapsed:.2f}s)\n原因: 所有API均失败"
+                )
+                return
             yield event.plain_result(f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {res}")
 
     @filter.command("画图添加模板", aliases={"lma", "lm添加"}, prefix_optional=True)
@@ -611,14 +615,13 @@ class ImageGenerationPlugin(Star):
 
         key, new_value = map(str.strip, raw.split(":", 1))
         prompt_list = self.conf.get("prompt_list", [])
-        found = False
-        for idx, item in enumerate(prompt_list):
+        for item in prompt_list:
             if item.strip().startswith(key + ":"):
-                prompt_list[idx] = f"{key}:{new_value}"
-                found = True
-                break
-        if not found:
-            prompt_list.append(f"{key}:{new_value}")
+                yield event.plain_result(f"预设指令“{key}”已存在，已取消添加。")
+                event.stop_event()
+                return
+
+        prompt_list.append(f"{key}:{new_value}")
 
         self.conf["prompt_list"] = prompt_list
         self.conf.save_config()
@@ -633,6 +636,27 @@ class ImageGenerationPlugin(Star):
             raw = raw.removeprefix("画图模型").strip()
         async for result in self._handle_model_pipeline_command(event, raw):
             yield result
+
+    @filter.command("画图简洁模式", prefix_optional=True)
+    async def on_concise_mode_command(self, event: AstrMessageEvent):
+        if not self.is_global_admin(event):
+            yield event.plain_result(self._admin_denied_message())
+            event.stop_event()
+            return
+
+        raw = event.message_str.strip()
+        if raw.startswith("画图简洁模式"):
+            raw = raw.removeprefix("画图简洁模式").strip()
+
+        if raw not in {"开启", "关闭"}:
+            yield event.plain_result("命令格式或参数错误，请重试。")
+            event.stop_event()
+            return
+
+        self.conf["concise_mode"] = raw == "开启"
+        self.conf.save_config()
+        yield event.plain_result("操作成功。")
+        event.stop_event()
 
     @filter.command("画图帮助", aliases={"lmh", "lm帮助"}, prefix_optional=True)
     async def on_prompt_help(self, event: AstrMessageEvent):

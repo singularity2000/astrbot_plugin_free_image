@@ -5,7 +5,7 @@ from ..workflow import ImageWorkflow
 from .base import BaseProvider
 from .gemini import GeminiProvider
 from .generic import GenericImageProvider
-from .openai_compat_chat import Flow2APIProvider, OpenAICompatChatProvider
+from .openai_compat_chat import OpenAICompatChatProvider
 from .openai_images import OpenAIImagesProvider
 from .openai_responses import OpenAIResponsesProvider
 from .vertex_ai_anonymous import VertexAIAnonymousProvider
@@ -18,7 +18,6 @@ PROVIDER_MAP: dict[str, type[BaseProvider]] = {
     "openai_compat_chat": OpenAICompatChatProvider,
     "siliconflow": GenericImageProvider,
     "bigmodel": GenericImageProvider,
-    "flow2api": Flow2APIProvider,
     "vertex_ai_anonymous": VertexAIAnonymousProvider,
 }
 
