@@ -14,6 +14,15 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 from .persistence import PersistenceManager
 from .pipeline import ImageGenPipeline
+from .selfie import (
+    build_selfie_prompt,
+    combine_images,
+    find_persona,
+    find_style,
+    load_persona_images,
+    resolve_persona,
+    resolve_style,
+)
 from .workflow import ImageWorkflow
 
 
@@ -65,6 +74,28 @@ class ImageGenerationPlugin(Star):
                 )
 
         logger.info("astrbot_plugin_free_image 插件已加载")
+
+        # send_selfie 工具动态描述注入
+        selfie_tool = self.context.get_llm_tool_manager().get_func("send_selfie")
+        if selfie_tool:
+            selfie_tool.description = self.conf.get(
+                "selfie_tool_description",
+                "以此 AI 助理的固定形象生成一张自拍图片。当用户要求机器人自拍、合影、展示形象等时调用此工具，不用于普通画图或改图。",
+            )
+            guidance = self.conf.get(
+                "selfie_prompt_guidance",
+                "Describe the selfie action, scene, posture, clothing, and mood in natural language. Keep the character's established identity; the action parameter should focus on what the character is doing or where they are.",
+            )
+            if (
+                "properties" in selfie_tool.parameters
+                and "action" in selfie_tool.parameters["properties"]
+            ):
+                selfie_tool.parameters["properties"]["action"]["description"] = guidance
+            if "properties" in selfie_tool.parameters and "style_id" in selfie_tool.parameters["properties"]:
+                from .selfie import _all_styles
+                styles_info = [f"{s['id']}（{s['name']}）" for s in _all_styles(self.conf) if s.get("id") and s.get("name")]
+                style_hint = f"可选。指定风格ID，留空由插件自动选择。当前已配置：{', '.join(styles_info)}" if styles_info else "可选。指定风格ID，留空由插件自动选择"
+                selfie_tool.parameters["properties"]["style_id"]["description"] = style_hint
 
     async def _load_prompt_map(self):
         logger.info("正在加载 prompts...")
@@ -795,6 +826,491 @@ class ImageGenerationPlugin(Star):
                 f"\n本群共享剩余次数为: {self.persistence.get_group_count(group_id)}"
             )
         yield event.plain_result(reply_msg)
+
+    # ─────────────────────────── 自拍核心入口 ───────────────────────────
+
+
+    async def _check_selfie_quota(
+        self, event: AstrMessageEvent, is_master: bool
+    ) -> Optional[str]:
+        """执行权限/黑白名单/冷却/配额检查，返回错误信息或 None。"""
+        if is_master:
+            return None
+        sender_id = event.get_sender_id()
+        group_id = event.get_group_id()
+        if sender_id in self.conf.get("user_blacklist", []):
+            return ""  # 黑名单静默
+        if group_id and group_id in self.conf.get("group_blacklist", []):
+            return ""
+        if self.conf.get("user_whitelist", []) and sender_id not in self.conf.get("user_whitelist", []):
+            return ""
+        if group_id and self.conf.get("group_whitelist", []) and group_id not in self.conf.get("group_whitelist", []):
+            return ""
+        if error_msg := await self.pipeline.check_rate_limit():
+            return error_msg
+        if deduction_error := await self.persistence.check_and_deduct_count(sender_id, group_id):
+            return deduction_error
+        return None
+
+    async def _exec_selfie(
+        self,
+        event: AstrMessageEvent,
+        action: str,
+        style_id_override: str = "",
+        is_llm_tool: bool = False,
+    ) -> str:
+        """执行自拍生图，返回状态字符串。图片通过 event.send 直接发送。"""
+        if not self.pipeline:
+            return "自拍失败，原因：插件尚未完成初始化。"
+
+        is_master = self.is_global_admin(event)
+        quota_err = await self._check_selfie_quota(event, is_master)
+        if quota_err is not None:
+            if quota_err and not is_llm_tool:
+                await event.send(event.plain_result(quota_err))
+            return f"自拍失败，原因：{quota_err}" if quota_err else ""
+
+        session_id = str(event.unified_msg_origin or "").strip()
+        persona = await resolve_persona(self.conf, self.context, event, session_id)
+        if not persona:
+            return "自拍失败，原因：还没有可用自拍人设，请管理员先用 #自拍人设 添加 创建人设，或在 WebUI 的 selfie_personas 中添加。"
+
+        persona_images = await load_persona_images(persona)
+        if not persona_images:
+            return f"自拍失败，原因：人设「{persona.get('name', persona.get('id'))}」没有可用的参考图，请检查路径是否正确。"
+
+        extra_images: list[bytes] = []
+        if self.iwf:
+            try:
+                extra_images = await self.iwf.get_selfie_extra_images(event)
+            except Exception:
+                extra_images = []
+
+        images_to_send = combine_images(persona_images, extra_images)
+
+        style = resolve_style(self.conf, action, style_id_override)
+        if style_id_override and not style:
+            logger.warning(f"[Selfie] 找不到自拍风格「{style_id_override}」，将以无风格继续生成。")
+
+        prompt = build_selfie_prompt(persona, action, style, bool(extra_images))
+        persona_name = persona.get("name", persona.get("id", ""))
+        style_name = style.get("name", "") if style else "无风格"
+        logger.info(f"[Selfie] 人设={persona_name}, 风格={style_name}, 参考图={len(images_to_send)}张")
+
+        group_id = event.get_group_id()
+        concise = True if is_llm_tool else (self.conf.get("concise_mode", False) and bool(group_id))
+
+        if not is_llm_tool and not concise:
+            await event.send(event.plain_result(f"📸 正在生成自拍 [{persona_name}]…"))
+
+        start_time = datetime.now()
+        res, model_name = await self.pipeline.execute(images_to_send, prompt)
+        elapsed = (datetime.now() - start_time).total_seconds()
+
+        image_results = self._normalize_image_results(res)
+        if image_results:
+            request_source: Literal["command", "llm_tool"] = "llm_tool" if is_llm_tool else "command"
+            if is_master:
+                remaining_str = "管理员剩余次数: ∞"
+            else:
+                parts_r = []
+                if self.conf.get("enable_user_limit", True):
+                    parts_r.append(f"个人剩余次数: {self.persistence.get_user_count(event.get_sender_id())}")
+                if self.conf.get("enable_group_limit", False) and group_id:
+                    parts_r.append(f"本群剩余次数: {self.persistence.get_group_count(group_id)}")
+                remaining_str = " | ".join(parts_r) if parts_r else ""
+            caption_text = " | ".join(filter(None, [
+                f"✅ 生成成功 ({elapsed:.2f}s)",
+                f"人设: {persona_name}",
+                f"风格: {style_name}",
+                remaining_str,
+                f"模型: {model_name}",
+            ]))
+            logger.info(caption_text)
+            async for msg in self._yield_success_images(
+                event=event, images=image_results, caption_text=caption_text,
+                concise_mode=concise, request_source=request_source,
+            ):
+                await event.send(msg)
+            return f"已成功为「{persona_name}」生成自拍（{elapsed:.1f}s），已发送给用户。"
+        else:
+            err = str(res)
+            if not is_llm_tool:
+                if concise and err.startswith("所有 API 均失败"):
+                    await event.send(event.plain_result(f"❌ 生成失败 ({elapsed:.2f}s)\n原因: 所有API均失败"))
+                else:
+                    await event.send(event.plain_result(f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {err}"))
+            return f"自拍失败，原因：{err}"
+
+    async def _run_selfie(
+        self,
+        event: AstrMessageEvent,
+        action: str,
+        style_id_override: str = "",
+        is_llm_tool: bool = False,
+    ):
+        """命令模式专用 async generator 包装。"""
+        result = await self._exec_selfie(event, action, style_id_override, is_llm_tool)
+        # 命令模式下错误已在 _exec_selfie 里直接发送，此处无需再 yield
+        _ = result  # suppress unused variable warning
+        return
+        yield  # make it an async generator
+
+    @filter.command("自拍帮助", prefix_optional=True)
+    async def on_selfie_help(self, event: AstrMessageEvent):
+        mode = self.conf.get("selfie_style_mode", "自动")
+        binding = self.conf.get("selfie_binding_mode", "优先 AstrBot persona")
+        yield event.plain_result(
+            "📸 自拍命令\n"
+            f"当前风格模式：{mode}  绑定模式：{binding}\n\n"
+            "#自拍 <描述>\n"
+            "#自拍人设 查看 / 列表 / 添加 <ID> <名称> / 绑定 <ID或名称> / 默认 <ID或名称>\n"
+            "#自拍风格 查看 / 列表 / 添加 <ID> <名称> <提示词> / 模式 <不注入/自动/指定> / 选择 <ID或名称>"
+        )
+        event.stop_event()
+
+    # ─────────────────────────── #自拍 命令 ───────────────────────────
+
+    @filter.command("自拍", prefix_optional=True)
+    async def on_selfie_command(self, event: AstrMessageEvent):
+        action = self._strip_command_prefix(
+            self._get_plain_message_text(event, strip_wake_prefix=True), "自拍"
+        ).strip()
+        if self.conf.get("concise_mode", False) and bool(event.get_group_id()):
+            try:
+                bot = getattr(event, "bot", None)
+                if not bot:
+                    provider = self.context.get_using_provider(event.unified_msg_origin)
+                    if provider and hasattr(provider, "bot"):
+                        bot = provider.bot
+                if bot and hasattr(bot, "set_msg_emoji_like"):
+                    await bot.set_msg_emoji_like(
+                        message_id=event.message_obj.message_id, emoji_id=66, set=True
+                    )
+            except Exception as e:
+                logger.debug(f"[#自拍] 贴表情失败: {e}")
+        async for msg in self._run_selfie(event, action, is_llm_tool=False):
+            yield msg
+        event.stop_event()
+
+    # ─────────────────────────── send_selfie LLM 工具 ───────────────────────────
+
+    @filter.llm_tool(name="send_selfie")
+    async def send_selfie(
+        self,
+        event: AstrMessageEvent,
+        action: str,
+        style_id: str = "",
+        aspect_ratio: str = "",
+    ):
+        """以此 AI 助理的固定形象生成一张自拍图片。当用户要求机器人自拍、合影、展示形象等时调用此工具，不用于普通画图或改图。
+
+        Args:
+            action(string): 动作、场景、姿势、服装或情绪描述，例如"在咖啡店窗边喝拿铁"。
+            style_id(string): 可选。指定风格 ID 或名称，例如 cinematic、selfie_realistic。留空由插件自动选择。
+            aspect_ratio(string): 可选。宽高比，例如 9:16、16:9、1:1。
+        """
+        full_action = action.strip()
+        if aspect_ratio:
+            full_action = f"{full_action}, aspect ratio {aspect_ratio}" if full_action else f"aspect ratio {aspect_ratio}"
+
+        result_msg = ""
+        if bool(event.get_group_id()):
+            try:
+                bot = getattr(event, "bot", None)
+                if not bot:
+                    provider = self.context.get_using_provider(event.unified_msg_origin)
+                    if provider and hasattr(provider, "bot"):
+                        bot = provider.bot
+                if bot and hasattr(bot, "set_msg_emoji_like"):
+                    await bot.set_msg_emoji_like(
+                        message_id=event.message_obj.message_id, emoji_id=66, set=True
+                    )
+            except Exception as e:
+                logger.debug(f"[send_selfie] 贴表情失败: {e}")
+        try:
+            async def _bg():
+                nonlocal result_msg
+                result_msg = await self._exec_selfie(event, full_action, style_id_override=style_id, is_llm_tool=True)
+
+            asyncio.create_task(_bg())
+        except Exception as e:
+            result_msg = f"自拍失败，原因：{e}"
+            logger.error(f"[send_selfie] 异常: {e}")
+
+        event.stop_event()
+        return "系统提示：自拍生成中，完成后将直接发给用户。"
+
+    # ─────────────────────────── 人设管理命令 ───────────────────────────
+
+    @filter.command("自拍人设", prefix_optional=True)
+    async def on_selfie_persona_cmd(self, event: AstrMessageEvent):
+        raw = self._strip_command_prefix(
+            self._get_plain_message_text(event, strip_wake_prefix=True), "自拍人设"
+        ).strip()
+        parts = raw.split(maxsplit=1)
+        sub = parts[0].strip() if parts else ""
+        args = parts[1].strip() if len(parts) > 1 else ""
+
+        if sub == "查看":
+            yield event.plain_result(await self._selfie_persona_info(args, event))
+        elif sub == "列表":
+            yield event.plain_result(self._selfie_persona_list())
+        elif sub == "添加":
+            if not self.is_global_admin(event):
+                yield event.plain_result(self._admin_denied_message())
+                event.stop_event()
+                return
+            yield event.plain_result(await self._selfie_persona_add(args, event))
+        elif sub == "绑定":
+            if not self.is_global_admin(event):
+                yield event.plain_result(self._admin_denied_message())
+                event.stop_event()
+                return
+            yield event.plain_result(self._selfie_persona_bind(args, event))
+        elif sub == "默认":
+            if not self.is_global_admin(event):
+                yield event.plain_result(self._admin_denied_message())
+                event.stop_event()
+                return
+            yield event.plain_result(self._selfie_persona_set_default(args))
+        else:
+            yield event.plain_result(
+                "#自拍人设 查看 [ID或名称]\n"
+                "#自拍人设 列表\n"
+                "#自拍人设 添加 <ID> <名称>  （同时发送/引用图片）\n"
+                "#自拍人设 绑定 <ID或名称>\n"
+                "#自拍人设 默认 <ID或名称>"
+            )
+        event.stop_event()
+
+    def _selfie_persona_list(self) -> str:
+        from .selfie import _all_personas
+        personas = _all_personas(self.conf)
+        if not personas:
+            return "当前还没有自拍人设。"
+        default_id = self.conf.get("selfie_default_persona_id", "")
+        lines = ["自拍人设列表："]
+        for p in personas:
+            pid = p.get("id", "")
+            flag = "★" if pid == default_id else " "
+            lines.append(f"{flag} [{pid}] {p.get('name', '')}  参考图 {len(p.get('ref_images') or [])} 张")
+        return "\n".join(lines)
+
+    async def _selfie_persona_info(self, query: str, event: AstrMessageEvent) -> str:
+        if query:
+            p = find_persona(self.conf, query)
+            if not p:
+                return f"找不到自拍人设：{query}。"
+        else:
+            session_id = str(event.unified_msg_origin or "")
+            p = await resolve_persona(self.conf, self.context, event, session_id)
+            if not p:
+                return "当前没有命中任何自拍人设，请先配置全局默认人设。"
+        return (
+            f"人设 ID：{p.get('id')}\n"
+            f"名称：{p.get('name')}\n"
+            f"描述：{p.get('description') or '（无）'}\n"
+            f"参考图：{len(p.get('ref_images') or [])} 张\n"
+            f"路径：{'; '.join(p.get('ref_images') or []) or '（无）'}"
+        )
+
+    async def _selfie_persona_add(self, args: str, event: AstrMessageEvent) -> str:
+        parts = args.split(maxsplit=1)
+        if len(parts) < 2:
+            return "格式：#自拍人设 添加 <ID> <名称>（同时发送/引用图片）"
+        pid, name = parts[0].strip(), parts[1].strip()
+        if not pid or not name:
+            return "ID 和名称不能为空。"
+        from .selfie import _all_personas
+        if any(p.get("id") == pid for p in _all_personas(self.conf)):
+            return f"自拍人设 ID 已存在：{pid}。"
+
+        # 收集本次消息图片并保存到数据目录
+        imgs: list[bytes] = []
+        if self.iwf:
+            imgs = await self.iwf.get_images(event)
+        if not imgs:
+            return "请随消息发送或引用至少一张图片作为参考图。"
+
+        save_dir = StarTools.get_data_dir() / "selfie_personas" / pid
+        save_dir.mkdir(parents=True, exist_ok=True)
+        saved_paths: list[str] = []
+        loop = asyncio.get_running_loop()
+        for i, img_bytes in enumerate(imgs):
+            path = save_dir / f"ref_{i+1}.png"
+            await loop.run_in_executor(None, path.write_bytes, img_bytes)
+            saved_paths.append(str(path))
+
+        personas = list(self.conf.get("selfie_personas", []) or [])
+        personas.append({
+            "__template_key": "selfie_persona",
+            "id": pid,
+            "name": name,
+            "description": "",
+            "ref_images": saved_paths,
+        })
+        self.conf["selfie_personas"] = personas
+        self.conf.save_config()
+        return f"✅ 已保存自拍人设「{name}」（{pid}），参考图 {len(saved_paths)} 张。"
+
+    def _selfie_persona_bind(self, args: str, event: AstrMessageEvent) -> str:
+        p = find_persona(self.conf, args)
+        if not p:
+            return f"找不到自拍人设：{args}。"
+        sid = str(event.unified_msg_origin or "").strip()
+        if not sid:
+            return "无法获取当前会话 SID，绑定失败。"
+        personas = list(self.conf.get("selfie_personas") or [])
+        pid = p.get("id")
+        for entry in personas:
+            if not isinstance(entry, dict):
+                continue
+            sids = list(entry.get("bound_sids") or [])
+            if entry.get("id") == pid:
+                if sid not in sids:
+                    sids.append(sid)
+                    entry["bound_sids"] = sids
+            else:
+                # 从其他人设中移除此 SID（一个 SID 只绑一个人设）
+                if sid in sids:
+                    sids.remove(sid)
+                    entry["bound_sids"] = sids
+        self.conf["selfie_personas"] = personas
+        self.conf.save_config()
+        return f"✅ 已将当前会话（{sid}）绑定至人设「{p.get('name')}」。"
+
+    def _selfie_persona_set_default(self, args: str) -> str:
+        p = find_persona(self.conf, args)
+        if not p:
+            return f"找不到自拍人设：{args}。"
+        self.conf["selfie_default_persona_id"] = p.get("id")
+        self.conf.save_config()
+        return f"✅ 已将全局默认人设设为「{p.get('name')}」。"
+
+    # ─────────────────────────── 风格管理命令 ───────────────────────────
+
+    @filter.command("自拍风格", prefix_optional=True)
+    async def on_selfie_style_cmd(self, event: AstrMessageEvent):
+        raw = self._strip_command_prefix(
+            self._get_plain_message_text(event, strip_wake_prefix=True), "自拍风格"
+        ).strip()
+        parts = raw.split(maxsplit=1)
+        sub = parts[0].strip() if parts else ""
+        args = parts[1].strip() if len(parts) > 1 else ""
+
+        if sub == "查看":
+            yield event.plain_result(self._selfie_style_info(args, event))
+        elif sub == "列表":
+            yield event.plain_result(self._selfie_style_list())
+        elif sub == "添加":
+            if not self.is_global_admin(event):
+                yield event.plain_result(self._admin_denied_message())
+                event.stop_event()
+                return
+            yield event.plain_result(self._selfie_style_add(args))
+        elif sub == "模式":
+            if not self.is_global_admin(event):
+                yield event.plain_result(self._admin_denied_message())
+                event.stop_event()
+                return
+            yield event.plain_result(self._selfie_style_set_mode(args))
+        elif sub == "选择":
+            if not self.is_global_admin(event):
+                yield event.plain_result(self._admin_denied_message())
+                event.stop_event()
+                return
+            yield event.plain_result(self._selfie_style_select(args))
+        else:
+            yield event.plain_result(
+                "#自拍风格 查看 [ID或名称]\n"
+                "#自拍风格 列表\n"
+                "#自拍风格 添加 <ID> <名称> <提示词>  （关键词用竖线分隔追加，可省略）\n"
+                "#自拍风格 模式 <不注入/自动/指定>\n"
+                "#自拍风格 选择 <ID或名称>"
+            )
+        event.stop_event()
+
+    def _selfie_style_list(self) -> str:
+        from .selfie import _all_styles
+        styles = _all_styles(self.conf)
+        if not styles:
+            return "当前风格模板库为空。"
+        selected = self.conf.get("selfie_selected_style_id", "")
+        mode = self.conf.get("selfie_style_mode", "自动")
+        lines = [f"自拍风格列表（当前模式：{mode}）："]
+        for s in styles:
+            flag = "→" if s.get("id") == selected else " "
+            lines.append(f"{flag} [{s.get('id')}] {s.get('name')}")
+        return "\n".join(lines)
+
+    def _selfie_style_info(self, query: str, event: AstrMessageEvent) -> str:
+        if query:
+            s = find_style(self.conf, query)
+            if not s:
+                return f"找不到自拍风格：{query}。"
+        else:
+            mode = self.conf.get("selfie_style_mode", "自动")
+            selected = self.conf.get("selfie_selected_style_id", "")
+            s = find_style(self.conf, selected) if selected else None
+            if not s:
+                return f"当前模式：{mode}，未指定默认风格。"
+        return (
+            f"风格 ID：{s.get('id')}\n"
+            f"名称：{s.get('name')}\n"
+            f"关键词：{', '.join(s.get('keywords') or []) or '（无）'}\n"
+            f"提示词：{s.get('prompt', '')}"
+        )
+
+    def _selfie_style_add(self, args: str) -> str:
+        # 格式：<ID> <名称> <提示词> [|关键词1|关键词2]
+        # 关键词部分可选，用竖线开头
+        parts = args.split(maxsplit=2)
+        if len(parts) < 3:
+            return "格式：#自拍风格 添加 <ID> <名称> <提示词>"
+        sid, name = parts[0].strip(), parts[1].strip()
+        rest = parts[2].strip()
+        keywords: list[str] = []
+        if "|" in rest:
+            prompt_part, _, kw_part = rest.partition("|")
+            prompt_str = prompt_part.strip()
+            keywords = [k.strip() for k in kw_part.split("|") if k.strip()]
+        else:
+            prompt_str = rest
+        if not sid or not name or not prompt_str:
+            return "ID、名称和提示词不能为空。"
+        from .selfie import _all_styles
+        if any(s.get("id") == sid for s in _all_styles(self.conf)):
+            return f"自拍风格 ID 已存在：{sid}。"
+        styles = list(self.conf.get("selfie_styles", []) or [])
+        styles.append({
+            "__template_key": "selfie_style",
+            "id": sid,
+            "name": name,
+            "prompt": prompt_str,
+            "keywords": keywords,
+            "enabled": True,
+        })
+        self.conf["selfie_styles"] = styles
+        self.conf.save_config()
+        return f"✅ 已添加自拍风格「{name}」（{sid}）。"
+
+    def _selfie_style_set_mode(self, args: str) -> str:
+        mode_map = {"不注入": "不注入", "自动": "自动", "指定": "指定"}
+        m = mode_map.get(args.strip())
+        if not m:
+            return "支持的模式：不注入、自动、指定。"
+        self.conf["selfie_style_mode"] = m
+        self.conf.save_config()
+        return f"✅ 自拍风格注入模式已设为「{m}」。"
+
+    def _selfie_style_select(self, args: str) -> str:
+        s = find_style(self.conf, args)
+        if not s:
+            return f"找不到自拍风格：{args}。"
+        self.conf["selfie_selected_style_id"] = s.get("id")
+        self.conf.save_config()
+        return f"✅ 已将指定风格设为「{s.get('name')}」（{s.get('id')}）。"
 
     async def terminate(self):
         if self.iwf:

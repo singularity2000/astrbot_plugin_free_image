@@ -552,7 +552,7 @@
         "default": 5
     },
     "llm_tool_description": {
-        "description": "【函数调用】函数工具描述",
+        "description": "【函数调用】生图工具描述",
         "type": "text",
         "hint": "自定义 LLM 调用此工具时的功能介绍。",
         "default": "专业的文生图、图生图工具。理解用户语义，仅当用户需要你生图，或修改图片内容时才调用此工具。"
@@ -562,6 +562,144 @@
         "type": "text",
         "default": "Change the user's input into a professional image generation prompt while strictly preserving the original intent. (All live-action female characters will default to an Asian aesthetic or beautiful Korean girl and do NOT specify image resolution, unless explicitly requested by the user.)",
         "hint": "当 LLM 决定调用画图工具时，该描述将指导 LLM 如何构造发送给绘图 API 的最终 Prompt。建议使用英文以获得更好的模型遵循效果。"
+    },
+    "selfie_tool_description": {
+        "description": "【函数调用】自拍工具描述",
+        "type": "text",
+        "default": "以此 AI 助理的固定形象生成一张自拍图片。当用户要求机器人自拍、合影、展示形象等时调用此工具，不用于普通画图或改图。",
+        "hint": "告诉 LLM 什么情况下调用 send_selfie，与 image_generation 区分开。"
+    },
+    "selfie_prompt_guidance": {
+        "description": "【函数调用】自拍提示词扩充指南",
+        "type": "text",
+        "default": "Describe the selfie action, scene, posture, clothing, and mood in natural language. Keep the character's established identity; the action parameter should focus on what the character is doing or where they are.",
+        "hint": "指导 LLM 如何构造 send_selfie 的 action 参数。"
+    },
+    "selfie_binding_mode": {
+        "description": "【自拍】人设绑定模式",
+        "type": "string",
+        "options": ["优先 AstrBot persona", "优先会话 SID", "只使用手动指定的selfie人设"],
+        "default": "优先 AstrBot persona",
+        "hint": "优先 AstrBot persona：检测当前会话的 AstrBot persona，查找其在人设库中的绑定；找不到再回退到会话 SID 绑定；再找不到回退到全局默认人设。优先会话 SID：先按群/私聊 SID 查找绑定；找不到再回退到 AstrBot persona 绑定；再找不到回退到全局默认人设。只使用手动指定的selfie人设：忽略 persona 和 SID 绑定，直接使用下方指定的 selfie 人设，为空则回退到全局默认人设。"
+    },
+    "selfie_persona_manual_override": {
+        "description": "【自拍】手动指定的selfie人设 ID",
+        "type": "string",
+        "default": "",
+        "hint": "仅当绑定模式为\"只使用手动指定的selfie人设\"时生效。填写 selfie_personas 中某个人设的 id，为空则回退到全局默认人设。"
+    },
+    "selfie_default_persona_id": {
+        "description": "【自拍】全局默认人设 ID",
+        "type": "string",
+        "default": "",
+        "hint": "留空时自动使用 selfie_personas 列表中的第一个人设作为兜底。填写某个人设的 id 后，所有未命中绑定的会话均使用此人设。也可用命令 #自拍人设 默认 <名称> 来修改。"
+    },
+    "selfie_style_mode": {
+        "description": "【自拍】风格注入模式",
+        "type": "string",
+        "options": ["不注入", "自动", "指定"],
+        "default": "自动",
+        "hint": "不注入：不追加风格模板；自动：按关键词自动命中风格；指定：始终使用下方设定的风格 ID。"
+    },
+    "selfie_selected_style_id": {
+        "description": "【自拍】指定风格 ID",
+        "type": "string",
+        "default": "selfie_realistic",
+        "hint": "仅在\"指定\"模式时生效。填写 selfie_styles 中某条记录的 id。"
+    },
+    "selfie_personas": {
+        "description": "【自拍】生图人设库",
+        "type": "template_list",
+        "hint": "每条记录是一套自拍人设。id 和名称用于绑定和命令查找；ref_images 填写参考图的本地绝对路径列表（支持多张）；description 为角色文字描述，可为空。",
+        "templates": {
+            "selfie_persona": {
+                "name": "自拍人设",
+                "items": {
+                    "id": {
+                        "description": "人设 ID（英文，唯一）",
+                        "type": "string",
+                        "default": "default",
+                        "hint": "用于绑定和命令指定，英文字母、数字、下划线，全局唯一。"
+                    },
+                    "name": {
+                        "description": "人设名称",
+                        "type": "string",
+                        "default": "默认人设",
+                        "hint": "展示名称，也可用于命令中按名称查找。"
+                    },
+                    "description": {
+                        "description": "人设文字描述",
+                        "type": "text",
+                        "default": "",
+                        "hint": "角色长期固定的外观特征，例如：银发蓝眼、温柔可爱的虚拟助手。可留空。"
+                    },
+                    "ref_images": {
+                        "description": "参考图路径列表",
+                        "type": "list",
+                        "default": [],
+                        "hint": "填写参考图的本地绝对路径，支持多张。例如：/data/plugin_data/astrbot_plugin_free_image/selfie_personas/default/ref_1.png",
+                        "items": { "type": "string", "description": "图片绝对路径" }
+                    },
+                    "bound_sids": {
+                        "description": "绑定的会话 SID 列表",
+                        "type": "list",
+                        "default": [],
+                        "hint": "填写需要绑定到此人设的会话 SID，例如 aiocqhttp:GroupMessage:12345678。也可通过命令 #自拍人设 绑定 自动写入当前会话 SID。",
+                        "items": { "type": "string", "description": "会话 SID" }
+                    },
+                    "bound_astrbot_personas": {
+                        "description": "绑定的 AstrBot Persona 名称列表",
+                        "type": "list",
+                        "default": [],
+                        "hint": "填写需要绑定到此自拍人设的 AstrBot persona 名称（即 persona 的 ID/名称），支持多个。当对话使用其中任意一个 persona 时，自动使用此自拍人设。",
+                        "items": { "type": "string", "description": "Persona 名称" }
+                    }
+                }
+            }
+        }
+    },
+    "selfie_styles": {
+        "description": "【自拍】风格模板库",
+        "type": "template_list",
+        "hint": "所有风格模板，内置和用户自定义同级。id 用于命令和 style_id 参数；keywords 用于自动模式关键词匹配；prompt 会作为后缀注入到最终生图 prompt。",
+        "templates": {
+            "selfie_style": {
+                "name": "风格模板",
+                "items": {
+                    "id": {
+                        "description": "风格 ID（英文，唯一）",
+                        "type": "string",
+                        "default": "selfie_realistic",
+                        "hint": "用于命令和 send_selfie 的 style_id 参数。"
+                    },
+                    "name": {
+                        "description": "风格名称",
+                        "type": "string",
+                        "default": "自拍专用极致真实",
+                        "hint": "展示名称，也可用于命令中按名称查找。"
+                    },
+                    "prompt": {
+                        "description": "风格提示词",
+                        "type": "text",
+                        "default": "natural smartphone selfie, believable age and facial structure, preserved identity, healthy matte-to-satin skin, no beauty filter, casual daily outfit, realistic shoulder and neck geometry, deep depth of field, unedited phone color",
+                        "hint": "追加到生图 prompt 末尾的风格描述，建议使用英文。"
+                    },
+                    "keywords": {
+                        "description": "自动匹配关键词",
+                        "type": "list",
+                        "default": ["自拍", "看看你", "真实", "手机", "selfie", "日常"],
+                        "hint": "自动模式下，用户描述命中这些关键词时选用此风格。",
+                        "items": { "type": "string", "description": "关键词" }
+                    },
+                    "enabled": {
+                        "description": "启用",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "关闭后此风格不参与任何选择。"
+                    }
+                }
+            }
+        }
     },
     "prompt_list": {
         "description": "生图触发词与提示词",

@@ -93,5 +93,49 @@ class ImageWorkflow:
 
         return img_bytes_list
 
+    async def get_selfie_extra_images(self, event: AstrMessageEvent) -> List[bytes]:
+        """自拍专用图片读取，不触发发送者头像兜底，@机器人自身被忽略。"""
+        bot_id = str(event.get_self_id() or "")
+        img_bytes_list: List[bytes] = []
+        at_user_ids: List[str] = []
+
+        # 引用图优先，有则直接返回，不处理 @
+        for seg in event.message_obj.message:
+            if isinstance(seg, Reply) and seg.chain:
+                for s in seg.chain:
+                    if isinstance(s, Image):
+                        if s.url and (img := await self._load_bytes(s.url)):
+                            img_bytes_list.append(img)
+                        elif s.file and (img := await self._load_bytes(s.file)):
+                            img_bytes_list.append(img)
+        if img_bytes_list:
+            return img_bytes_list
+
+        for seg in event.message_obj.message:
+            if isinstance(seg, Image):
+                if seg.url and (img := await self._load_bytes(seg.url)):
+                    img_bytes_list.append(img)
+                elif seg.file and (img := await self._load_bytes(seg.file)):
+                    img_bytes_list.append(img)
+            elif isinstance(seg, At):
+                uid = str(seg.qq)
+                if uid != bot_id:
+                    at_user_ids.append(uid)
+
+        # 有显式图：追加非机器人的 @ 头像
+        if img_bytes_list:
+            for uid in at_user_ids:
+                if avatar := await self._get_avatar(uid):
+                    img_bytes_list.append(avatar)
+            return img_bytes_list
+
+        # 无图，只有非机器人的 @：返回其头像
+        for uid in at_user_ids:
+            if avatar := await self._get_avatar(uid):
+                img_bytes_list.append(avatar)
+
+        # 无图、无非机器人 @（含纯文字、纯 @机器人）：返回空，不兜底发送者头像
+        return img_bytes_list
+
     async def terminate(self):
         if self.session and not self.session.closed: await self.session.close()
