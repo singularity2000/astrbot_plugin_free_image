@@ -1,11 +1,14 @@
-import json
 import asyncio
 import functools
+import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
+
 from astrbot import logger
 from astrbot.core import AstrBotConfig
+from astrbot.core.platform.astr_message_event import AstrMessageEvent
+
 
 class PersistenceManager:
     def __init__(self, config: AstrBotConfig, data_dir: Path):
@@ -31,7 +34,8 @@ class PersistenceManager:
         self.user_checkin_data = await self._load_json(self.user_checkin_file)
 
     async def _load_json(self, path: Path) -> dict:
-        if not path.exists(): return {}
+        if not path.exists():
+            return {}
         loop = asyncio.get_running_loop()
         try:
             content = await loop.run_in_executor(None, path.read_text, "utf-8")
@@ -44,7 +48,9 @@ class PersistenceManager:
     async def _save_json(self, path: Path, data: dict):
         loop = asyncio.get_running_loop()
         try:
-            json_data = await loop.run_in_executor(None, functools.partial(json.dumps, data, ensure_ascii=False, indent=4))
+            json_data = await loop.run_in_executor(
+                None, functools.partial(json.dumps, data, ensure_ascii=False, indent=4)
+            )
             await loop.run_in_executor(None, path.write_text, json_data, "utf-8")
         except Exception as e:
             logger.error(f"保存文件 {path.name} 失败: {e}")
@@ -52,8 +58,9 @@ class PersistenceManager:
     def get_user_count(self, user_id: str) -> int:
         permanent = self.user_counts.get(str(user_id), 0)
         daily_quota = self.conf.get("user_daily_fixed_quota", 0)
-        if daily_quota <= 0: return permanent
-        
+        if daily_quota <= 0:
+            return permanent
+
         today = datetime.now().strftime("%Y-%m-%d")
         daily_data = self.user_daily_counts.get(str(user_id), {})
         used_today = daily_data.get("count", 0) if daily_data.get("date") == today else 0
@@ -78,7 +85,8 @@ class PersistenceManager:
     def get_group_count(self, group_id: str) -> int:
         permanent = self.group_counts.get(str(group_id), 0)
         daily_quota = self.conf.get("group_daily_fixed_quota", 0)
-        if daily_quota <= 0: return permanent
+        if daily_quota <= 0:
+            return permanent
 
         today = datetime.now().strftime("%Y-%m-%d")
         daily_data = self.group_daily_counts.get(str(group_id), {})
@@ -101,26 +109,37 @@ class PersistenceManager:
                 self.group_daily_counts[gid] = {"date": today, "count": used_today + 1}
                 await self._save_json(self.group_daily_counts_file, self.group_daily_counts)
 
-    async def check_and_deduct_count(self, user_id: str, group_id: Optional[str]) -> Optional[str]:
+    def check_count_available(self, user_id: str, group_id: Optional[str]) -> Optional[str]:
         user_limit_on = self.conf.get("enable_user_limit", True)
         group_limit_on = self.conf.get("enable_group_limit", False) and group_id
 
         if group_limit_on and self.get_group_count(group_id) > 0:
-            await self.decrease_group_count(group_id)
             return None
-
         if user_limit_on and self.get_user_count(user_id) > 0:
-            await self.decrease_user_count(user_id)
             return None
-
-        if not user_limit_on and not group_limit_on: return None
+        if not user_limit_on and not group_limit_on:
+            return None
 
         if user_limit_on and group_limit_on:
             return "❌ 本群和您的个人次数均已用完，请等待次日重置或向管理员索要。"
-        elif user_limit_on:
+        if user_limit_on:
             return "❌ 您的个人使用次数已用完，请等待次日重置或向管理员索要。"
-        elif group_limit_on:
+        if group_limit_on:
             return "❌ 本群的使用次数已用完，请等待次日重置或向管理员索要。"
+        return None
+
+    async def check_and_deduct_count(self, user_id: str, group_id: Optional[str]) -> Optional[str]:
+        if error := self.check_count_available(user_id, group_id):
+            return error
+
+        user_limit_on = self.conf.get("enable_user_limit", True)
+        group_limit_on = self.conf.get("enable_group_limit", False) and group_id
+        if group_limit_on and self.get_group_count(group_id) > 0:
+            await self.decrease_group_count(group_id)
+            return None
+        if user_limit_on and self.get_user_count(user_id) > 0:
+            await self.decrease_user_count(user_id)
+            return None
         return None
 
     async def save_user_checkin(self, user_id: str, date_str: str):
@@ -136,3 +155,49 @@ class PersistenceManager:
         gid = str(group_id)
         self.group_counts[gid] = self.group_counts.get(gid, 0) + count
         await self._save_json(self.group_counts_file, self.group_counts)
+
+
+class UsageGuard:
+    """Permission, cooldown, and quota checks shared by image and selfie flows."""
+
+    def __init__(self, conf, persistence: PersistenceManager, pipeline):
+        self.conf = conf
+        self.persistence = persistence
+        self.pipeline = pipeline
+
+    async def check_can_use(
+        self, event: AstrMessageEvent, is_master: bool
+    ) -> Optional[str]:
+        if is_master:
+            return None
+
+        sender_id = event.get_sender_id()
+        group_id = event.get_group_id()
+
+        if sender_id in self.conf.get("user_blacklist", []):
+            return ""
+        if group_id and group_id in self.conf.get("group_blacklist", []):
+            return ""
+        if self.conf.get("user_whitelist", []) and sender_id not in self.conf.get(
+            "user_whitelist", []
+        ):
+            return ""
+        if (
+            group_id
+            and self.conf.get("group_whitelist", [])
+            and group_id not in self.conf.get("group_whitelist", [])
+        ):
+            return ""
+
+        if error_msg := await self.pipeline.check_rate_limit():
+            return error_msg
+        return self.persistence.check_count_available(sender_id, group_id)
+
+    async def deduct_after_success(
+        self, event: AstrMessageEvent, is_master: bool
+    ) -> Optional[str]:
+        if is_master:
+            return None
+        return await self.persistence.check_and_deduct_count(
+            event.get_sender_id(), event.get_group_id()
+        )

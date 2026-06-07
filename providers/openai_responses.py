@@ -44,6 +44,7 @@ class OpenAIResponsesProvider(BaseProvider):
                     json=payload,
                     headers={"Authorization": f"Bearer {api_key}"},
                     proxy=self.proxy,
+                    timeout=self.api_timeout,
                 ) as resp:
                     data = await resp.json()
                     if resp.status != 200:

@@ -24,7 +24,7 @@
 ## 安装与配置
 
 1. 将本仓库放入 AstrBot 插件目录并启用插件。
-2. 安装依赖：本仓库已在 `requirements.txt` 声明 `curl_cffi`。
+2. 安装依赖：本仓库已在 `requirements.txt` 声明 `aiohttp`、`beautifulsoup4`、`curl_cffi`、`Pillow`。
 3. 在 AstrBot WebUI 中配置 `api_pipeline`，至少添加一个已启用的图片生成节点。
 4. 如果节点需要 API Key，请在对应 `api_pipeline` 节点的 `api_keys` 中填写。聊天命令不再提供 Key 增删查功能。
 
@@ -184,7 +184,7 @@ Provider 行为说明：
 1. 用户说"看看你""自拍一张""你现在的样子"等时，LLM 应调用 `send_selfie`，而非 `image_generation`。
 2. 当前消息或引用消息中含图片时，图片会作为本次自拍的额外参考图；只有 @其他用户且无图时，会使用该用户头像作为额外参考图。
 3. `send_selfie` 始终按简洁模式发送结果；成功后直接发图，不给用户发送机械化成功文案。
-4. 失败信息只返回给 LLM，由 LLM 自然转达，保持沉浸感。
+4. 失败时插件会在后台尝试调用当前会话的 LLM，用角色语气自然解释失败原因；如果当前没有可用 LLM，则发送降级提示。
 5. 自拍同样受权限、配额、冷却限制，不能绕过。
 
 ## 自拍功能快速上手
@@ -251,28 +251,58 @@ Provider 行为说明：
 - `#自拍风格 模式 指定` + `#自拍风格 选择 <风格>` — 固定使用某套风格
 - `#自拍风格 添加 <ID> <名称> <提示词>` — 新增自定义风格
 
-## 持久化数据
+## 目录结构
 
-插件使用 `StarTools.get_data_dir()` 获取数据目录，并保存以下 JSON 文件：
+下面用相对路径说明插件代码、配置和运行数据的职责。
 
-| 文件 | 用途 |
-| :--- | :--- |
-| `user_counts.json` | 用户永久次数。 |
-| `group_counts.json` | 群组永久次数。 |
-| `user_daily_counts.json` | 用户每日额度使用情况。 |
-| `group_daily_counts.json` | 群组每日额度使用情况。 |
-| `user_checkin.json` | 用户签到日期记录。 |
-| `selfie_personas/` | 自拍人设参考图保存目录。 |
+```text
+插件代码目录（data/plugins/astrbot_plugin_free_image/）
+├─ main.py                         # AstrBot 插件入口、命令注册、LLM 工具、核心生图/自拍执行
+├─ commands.py                     # 聊天命令处理逻辑：画图、模型管理、次数、自拍人设/风格管理
+├─ pipeline.py                     # 图片生成 Provider 管线，负责多节点顺序调用和失败回退
+├─ quota.py                        # 权限、冷却、配额、签到和 JSON 持久化
+├─ sender.py                       # 图片/视频发送策略、成功文案、引用回复、多图分条
+├─ workflow.py                     # 用户图片、引用图、@头像、动图首帧等输入图片读取
+├─ selfie.py                       # 自拍人设解析、风格选择、自拍 Prompt 拼接、参考图组合
+├─ providers/                      # 各图片生成 Provider 的适配实现
+│  ├─ base.py                      # Provider 基类、Key 轮换、重试退避公共逻辑
+│  ├─ gemini.py                    # Gemini 原生 API
+│  ├─ vertex_ai_anonymous.py       # Vertex AI 匿名逆向节点
+│  ├─ openai_images.py             # OpenAI Images API
+│  ├─ openai_responses.py          # OpenAI Responses API
+│  ├─ openai_compat_chat.py        # OpenAI Chat Completions 兼容端点
+│  └─ generic.py                   # SiliconFlow / BigModel 等通用图片接口
+├─ _conf_schema.json               # AstrBot WebUI 配置项定义
+├─ metadata.yaml                   # 插件元数据
+├─ requirements.txt                # 插件依赖
+├─ README.md                       # 使用说明
+├─ LICENSE                         # 开源协议
+└─ logo.png                        # 插件图标
+
+AstrBot 插件配置目录（data/config/）
+└─ astrbot_plugin_free_image_config.json      # WebUI 保存的插件配置，如 api_pipeline、配额、人设和风格模板
+
+AstrBot 插件独立数据目录（data/plugin_data/astrbot_plugin_free_image/）
+├─ user_counts.json                # 用户永久次数
+├─ group_counts.json               # 群组永久次数
+├─ user_daily_counts.json          # 用户每日额度使用记录
+├─ group_daily_counts.json         # 群组每日额度使用记录
+├─ user_checkin.json               # 用户签到日期记录
+└─ selfie_personas/                # 命令添加的自拍人设参考图
+   └─ <persona_id>/ref_*.png       # 某个自拍人设的参考图文件
+```
+
+说明：
+
+- `data/plugins/astrbot_plugin_free_image/` 是插件代码目录。
+- `data/config/astrbot_plugin_free_image_config.json` 是 WebUI 配置文件，保存用户显式配置。
+- `data/plugin_data/astrbot_plugin_free_image/` 是运行时数据目录，用于保存次数、签到和自拍参考图，便于卸载或迁移时统一处理。
 
 ## 常见问题
 
 ### 提示“API 管线为空或无已启用的提供商”
 
 请在 WebUI 的 `api_pipeline` 中添加至少一个节点，并确认该节点 `enabled=true`。
-
-### Vertex AI 匿名节点提示缺少 `curl_cffi`
-
-该节点依赖 `curl_cffi` 模拟浏览器指纹。请确认插件依赖已安装。
 
 ### 模板触发没反应
 
