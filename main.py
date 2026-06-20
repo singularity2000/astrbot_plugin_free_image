@@ -83,11 +83,11 @@ class ImageGenerationPlugin(Star):
         if selfie_tool:
             selfie_tool.description = self.conf.get(
                 "selfie_tool_description",
-                "以此 AI 助理的固定形象生成一张自拍图片。当用户要求机器人自拍、合影、展示形象等时调用此工具，不用于普通画图或改图。",
+                "以你的形象生成图片。理解用户语义，在用户要求生成“有你出镜”的图片时（如自拍、合影、展示形象等）须调用此工具，区别于常规生图。此工具自带你的形象参考图。",
             )
             guidance = self.conf.get(
                 "selfie_prompt_guidance",
-                "Describe the selfie action, scene, posture, clothing, and mood in natural language. Keep the character's established identity; the action parameter should focus on what the character is doing or where they are.",
+                "按照用户要求，合理补充照片的细节，可选：服装、姿势、场景、神态。可用第一人称的“我”称呼自己。避免描述人物的身份、头部外貌，以防止和参考图矛盾。",
             )
             if (
                 "properties" in selfie_tool.parameters
@@ -152,7 +152,7 @@ class ImageGenerationPlugin(Star):
                 async for result in self.handle_image_gen_logic(
                     event, prompt, is_i2i=is_i2i, request_source="llm_tool"
                 ):
-                    await event.send(result)
+                    await self._send_with_auto_quote(event, result)
             except Exception as e:
                 logger.error(f"Background image generation failed: {e}")
 
@@ -176,8 +176,35 @@ class ImageGenerationPlugin(Star):
         async for res in self.commands.on_image_to_image_request(event):
             yield res
 
-    async def _send_plain_direct(self, event: AstrMessageEvent, text: str) -> None:
-        await event.send(MessageChain(chain=[Plain(text)]))
+    def _should_auto_quote(self, event: AstrMessageEvent) -> bool:
+        """读取框架全局 reply_with_quote 开关。
+        模拟 yield 管道的自动引用回复行为，供 event.send 发送的文本提示使用。
+        """
+        try:
+            platform_settings = self.context.get_config().get("platform_settings", {})
+            return bool(platform_settings.get("reply_with_quote", True))
+        except Exception:
+            return True
+
+    async def _send_plain_direct(
+        self, event: AstrMessageEvent, text: str, with_reply: bool = True
+    ) -> None:
+        chain: list = [Plain(text)]
+        if with_reply and self._should_auto_quote(event):
+            chain.insert(0, Reply(id=event.message_obj.message_id))
+        await event.send(MessageChain(chain=chain))
+
+    async def _send_with_auto_quote(self, event: AstrMessageEvent, message) -> None:
+        """对 event.send 的消息模拟 yield 管道的自动引用回复行为。
+        若全局 reply_with_quote 开启，且 chain 为纯 Plain/Image 且无 Reply 组件，则插入 Reply。
+        """
+        chain = getattr(message, "chain", None)
+        if chain:
+            has_reply = any(isinstance(seg, Reply) for seg in chain)
+            can_decorate = all(isinstance(item, (Plain, Image)) for item in chain)
+            if not has_reply and can_decorate and self._should_auto_quote(event):
+                chain.insert(0, Reply(id=event.message_obj.message_id))
+        await event.send(message)
 
     def _compact_selfie_failure_reason(self, failure_msg: str) -> str:
         reason = str(failure_msg or "").strip()
@@ -213,11 +240,11 @@ class ImageGenerationPlugin(Star):
             text = str(getattr(llm_response, "completion_text", "") or "").strip()
             if not text:
                 raise RuntimeError("LLM 未返回失败解释")
-            await self._send_plain_direct(event, text)
+            await self._send_plain_direct(event, text, with_reply=False)
         except Exception as e:
             logger.warning(f"[send_selfie] 生成失败解释失败，将发送降级提示: {e}")
             await self._send_plain_direct(
-                event, self._fallback_selfie_failure_message(failure_msg)
+                event, self._fallback_selfie_failure_message(failure_msg), with_reply=False
             )
 
     async def handle_image_gen_logic(

@@ -566,13 +566,13 @@
     "selfie_tool_description": {
         "description": "【函数调用】自拍工具描述",
         "type": "text",
-        "default": "以此 AI 助理的固定形象生成一张自拍图片。当用户要求机器人自拍、合影、展示形象等时调用此工具，不用于普通画图或改图。",
+        "default": "以你的形象生成图片。理解用户语义，在用户要求生成“有你出镜”的图片时（如自拍、合影、展示形象等）须调用此工具，区别于常规生图。此工具自带你的形象参考图。",
         "hint": "告诉 LLM 什么情况下调用 send_selfie，与 image_generation 区分开。"
     },
     "selfie_prompt_guidance": {
         "description": "【函数调用】自拍提示词扩充指南",
         "type": "text",
-        "default": "Describe the selfie action, scene, posture, clothing, and mood in natural language. Keep the character's established identity; the action parameter should focus on what the character is doing or where they are.",
+        "default": "按照用户要求，合理补充照片的细节，可选：服装、姿势、场景、神态。可用第一人称的“我”称呼自己。避免描述人物的身份、头部外貌，以防止和参考图矛盾。",
         "hint": "指导 LLM 如何构造 send_selfie 的 action 参数。"
     },
     "selfie_binding_mode": {
@@ -675,19 +675,19 @@
                     "name": {
                         "description": "风格名称",
                         "type": "string",
-                        "default": "自拍专用极致真实",
+                        "default": "手机实拍风格",
                         "hint": "展示名称，也可用于命令中按名称查找。"
                     },
                     "prompt": {
                         "description": "风格提示词",
                         "type": "text",
-                        "default": "natural smartphone selfie, believable age and facial structure, preserved identity, healthy matte-to-satin skin, no beauty filter, casual daily outfit, realistic shoulder and neck geometry, deep depth of field, unedited phone color",
+                        "default": "[STYLE: natural smartphone selfie, unedited phone color, realistic style. 竖屏。超清真人摄影，实拍，去除这个成年虚构角色的漫画与CG质感，但充分保留角色的样貌特征。韩国审美。]",
                         "hint": "追加到生图 prompt 末尾的风格描述，建议使用英文。"
                     },
                     "keywords": {
                         "description": "自动匹配关键词",
                         "type": "list",
-                        "default": ["自拍", "看看你", "真实", "手机", "selfie", "日常"],
+                        "default": ["实拍", "phone", "真实", "手机", "日常", "写实", "realistic", "真人"],
                         "hint": "自动模式下，用户描述命中这些关键词时选用此风格。",
                         "items": { "type": "string", "description": "关键词" }
                     },
