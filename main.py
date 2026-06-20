@@ -353,21 +353,44 @@ class ImageGenerationPlugin(Star):
                 available = max(1, total_remain) if total_remain > 0 else 1
 
         # --- API 调用（支持多张） ---
+        # 管理员：并发请求（彼此间隔2秒防抖启动），不扣费无竞态
+        # 非管理员：串行请求，无间隔（Provider 内部已有重试退避）
+        if is_master and count > 1:
+            async for res in self._batch_generate_concurrent(
+                event, prompt, images_to_process, count, available,
+                is_i2i, display_name, concise_mode, request_source, model_index,
+            ):
+                yield res
+        else:
+            async for res in self._batch_generate_sequential(
+                event, prompt, images_to_process, count, available,
+                is_master, is_i2i, display_name, concise_mode,
+                request_source, sender_id, group_id, model_index,
+            ):
+                yield res
+
+    async def _batch_generate_sequential(
+        self,
+        event: AstrMessageEvent,
+        prompt: str,
+        images_to_process: list,
+        count: int,
+        available: int,
+        is_master: bool,
+        is_i2i: bool,
+        display_name: str,
+        concise_mode: bool,
+        request_source: Literal["command", "llm_tool"],
+        sender_id: str,
+        group_id: str,
+        model_index: Optional[int],
+    ):
+        """非管理员串行生图，无间隔。管理员单张也走这里。"""
         for i in range(count):
             suffix = f" ({i+1}/{count})" if count > 1 else ""
-            # 余额不足：发配额提示，不调用 API
             if i >= available:
-                quota_msg = "❌ 本群和您的个人次数均已用完，请等待次日重置或向管理员索要。"
-                # 更精确的配额提示
-                if self.conf.get("enable_user_limit", True) and self.conf.get("enable_group_limit", False) and group_id:
-                    quota_msg = "❌ 本群和您的个人次数均已用完，请等待次日重置或向管理员索要。"
-                elif self.conf.get("enable_user_limit", True):
-                    quota_msg = "❌ 您的个人使用次数已用完，请等待次日重置或向管理员索要。"
-                elif self.conf.get("enable_group_limit", False) and group_id:
-                    quota_msg = "❌ 本群的使用次数已用完，请等待次日重置或向管理员索要。"
+                quota_msg = self._build_quota_msg(group_id)
                 yield self._quoted_plain_result(event, f"{quota_msg}{suffix}")
-                if i < count - 1:
-                    await asyncio.sleep(2)
                 continue
 
             start_time = datetime.now()
@@ -376,82 +399,162 @@ class ImageGenerationPlugin(Star):
             )
             elapsed = (datetime.now() - start_time).total_seconds()
 
-            image_results = self.sender.normalize_image_results(res)
-            if image_results:
-                if deduction_error := await self.usage_guard.deduct_after_success(event, is_master):
-                    yield self._quoted_plain_result(event, f"{deduction_error}{suffix}")
-                    if i < count - 1:
-                        await asyncio.sleep(2)
-                    continue
-                caption_text = self.sender.build_success_caption(
-                    elapsed=elapsed,
-                    is_i2i=is_i2i,
-                    display_name=display_name,
-                    is_master=is_master,
-                    sender_id=sender_id,
-                    group_id=group_id,
-                    model_name=model_name,
-                )
-                caption_text = f"{caption_text}{suffix}"
-                logger.info(caption_text)
-                async for msg in self.sender.yield_success_images(
-                    event=event,
-                    images=image_results,
-                    caption_text=caption_text,
-                    concise_mode=concise_mode,
-                    request_source=request_source,
-                ):
-                    yield msg
-            elif isinstance(res, dict) and res.get("type") == "video" and res.get("url"):
-                if deduction_error := await self.usage_guard.deduct_after_success(event, is_master):
-                    yield self._quoted_plain_result(event, f"{deduction_error}{suffix}")
-                    if i < count - 1:
-                        await asyncio.sleep(2)
-                    continue
-                caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)", "结果类型: 视频"]
-                if is_i2i:
-                    caption_parts.append(f"预设: {display_name}")
+            async for msg in self._process_single_result(
+                event, res, model_name, elapsed, suffix, i, count,
+                is_master, is_i2i, display_name, concise_mode,
+                request_source, sender_id, group_id, model_index,
+            ):
+                yield msg
 
-                if is_master:
-                    caption_parts.append("管理员剩余次数: ∞")
-                else:
-                    if self.conf.get("enable_user_limit", True):
-                        caption_parts.append(
-                            f"个人剩余次数: {self.persistence.get_user_count(sender_id)}"
-                        )
-                    if self.conf.get("enable_group_limit", False) and group_id:
-                        caption_parts.append(
-                            f"本群剩余次数: {self.persistence.get_group_count(group_id)}"
-                        )
+    async def _batch_generate_concurrent(
+        self,
+        event: AstrMessageEvent,
+        prompt: str,
+        images_to_process: list,
+        count: int,
+        available: int,
+        is_i2i: bool,
+        display_name: str,
+        concise_mode: bool,
+        request_source: Literal["command", "llm_tool"],
+        model_index: Optional[int],
+    ):
+        """管理员并发生图，彼此间隔2秒防抖启动。不扣费，无竞态。"""
+        sender_id = event.get_sender_id()
+        group_id = event.get_group_id()
 
-                if model_name:
-                    caption_parts.append(f"模型: {model_name}")
+        async def _single(i: int):
+            suffix = f" ({i+1}/{count})" if count > 1 else ""
+            if i >= available:
+                quota_msg = self._build_quota_msg(group_id)
+                return ("quota", i, suffix, quota_msg)
 
-                caption_text = " | ".join(caption_parts) + suffix
-                video_component = Video.fromURL(url=res["url"])
-                logger.info(caption_text)
-                if concise_mode:
-                    yield event.chain_result(
-                        [Reply(id=event.message_obj.message_id), video_component]
-                    )
-                else:
-                    yield event.chain_result([video_component, Plain(caption_text)])
-            else:
-                if model_index is not None:
-                    # 指定模型模式：pipeline.execute 已返回带模型名的失败信息
-                    yield self._quoted_plain_result(
-                        event, f"❌ 指定模型生成失败 ({elapsed:.2f}s)\n原因: {res}{suffix}"
-                    )
-                elif concise_mode and str(res).startswith("所有 API 均失败"):
-                    yield self._quoted_plain_result(
-                        event, f"❌ 生成失败 ({elapsed:.2f}s)\n原因: 所有API均失败{suffix}"
-                    )
-                else:
-                    yield self._quoted_plain_result(event, f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {res}{suffix}")
+            start_time = datetime.now()
+            res, model_name = await self.pipeline.execute(
+                images_to_process, prompt, model_index=model_index
+            )
+            elapsed = (datetime.now() - start_time).total_seconds()
+            return ("result", i, suffix, (res, model_name, elapsed))
 
-            # 防抖间隔
+        # 并发启动，但彼此间隔2秒防抖
+        tasks: list[asyncio.Task] = []
+        for i in range(count):
+            tasks.append(asyncio.create_task(_single(i)))
             if i < count - 1:
                 await asyncio.sleep(2)
+
+        # 按启动顺序（即完成顺序）收集结果
+        for task in tasks:
+            kind, idx, suffix, payload = await task
+            if kind == "quota":
+                yield self._quoted_plain_result(event, f"{payload}{suffix}")
+                continue
+
+            res, model_name, elapsed = payload
+            async for msg in self._process_single_result(
+                event, res, model_name, elapsed, suffix, idx, count,
+                True,  # is_master=True（并发仅管理员）
+                is_i2i, display_name, concise_mode,
+                request_source, sender_id, group_id, model_index,
+            ):
+                yield msg
+
+    def _build_quota_msg(self, group_id: str) -> str:
+        """根据配额配置生成对应的配额不足提示。"""
+        if self.conf.get("enable_user_limit", True) and self.conf.get("enable_group_limit", False) and group_id:
+            return "❌ 本群和您的个人次数均已用完，请等待次日重置或向管理员索要。"
+        if self.conf.get("enable_user_limit", True):
+            return "❌ 您的个人使用次数已用完，请等待次日重置或向管理员索要。"
+        if self.conf.get("enable_group_limit", False) and group_id:
+            return "❌ 本群的使用次数已用完，请等待次日重置或向管理员索要。"
+        return "❌ 次数已用完。"
+
+    async def _process_single_result(
+        self,
+        event: AstrMessageEvent,
+        res,
+        model_name: Optional[str],
+        elapsed: float,
+        suffix: str,
+        i: int,
+        count: int,
+        is_master: bool,
+        is_i2i: bool,
+        display_name: str,
+        concise_mode: bool,
+        request_source: Literal["command", "llm_tool"],
+        sender_id: str,
+        group_id: str,
+        model_index: Optional[int],
+    ):
+        """处理单次 pipeline.execute 的结果，yield 出消息。扣费在非管理员时执行。"""
+        image_results = self.sender.normalize_image_results(res)
+        if image_results:
+            if deduction_error := await self.usage_guard.deduct_after_success(event, is_master):
+                yield self._quoted_plain_result(event, f"{deduction_error}{suffix}")
+                return
+            caption_text = self.sender.build_success_caption(
+                elapsed=elapsed,
+                is_i2i=is_i2i,
+                display_name=display_name,
+                is_master=is_master,
+                sender_id=sender_id,
+                group_id=group_id,
+                model_name=model_name,
+            )
+            caption_text = f"{caption_text}{suffix}"
+            logger.info(caption_text)
+            async for msg in self.sender.yield_success_images(
+                event=event,
+                images=image_results,
+                caption_text=caption_text,
+                concise_mode=concise_mode,
+                request_source=request_source,
+            ):
+                yield msg
+        elif isinstance(res, dict) and res.get("type") == "video" and res.get("url"):
+            if deduction_error := await self.usage_guard.deduct_after_success(event, is_master):
+                yield self._quoted_plain_result(event, f"{deduction_error}{suffix}")
+                return
+            caption_parts = [f"✅ 生成成功 ({elapsed:.2f}s)", "结果类型: 视频"]
+            if is_i2i:
+                caption_parts.append(f"预设: {display_name}")
+
+            if is_master:
+                caption_parts.append("管理员剩余次数: ∞")
+            else:
+                if self.conf.get("enable_user_limit", True):
+                    caption_parts.append(
+                        f"个人剩余次数: {self.persistence.get_user_count(sender_id)}"
+                    )
+                if self.conf.get("enable_group_limit", False) and group_id:
+                    caption_parts.append(
+                        f"本群剩余次数: {self.persistence.get_group_count(group_id)}"
+                    )
+
+            if model_name:
+                caption_parts.append(f"模型: {model_name}")
+
+            caption_text = " | ".join(caption_parts) + suffix
+            video_component = Video.fromURL(url=res["url"])
+            logger.info(caption_text)
+            if concise_mode:
+                yield event.chain_result(
+                    [Reply(id=event.message_obj.message_id), video_component]
+                )
+            else:
+                yield event.chain_result([video_component, Plain(caption_text)])
+        else:
+            if model_index is not None:
+                yield self._quoted_plain_result(
+                    event, f"❌ 指定模型生成失败 ({elapsed:.2f}s)\n原因: {res}{suffix}"
+                )
+            elif concise_mode and str(res).startswith("所有 API 均失败"):
+                yield self._quoted_plain_result(
+                    event, f"❌ 生成失败 ({elapsed:.2f}s)\n原因: 所有API均失败{suffix}"
+                )
+            else:
+                yield self._quoted_plain_result(event, f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {res}{suffix}")
 
     @filter.command("画图添加模板", aliases={"lma", "lm添加"}, prefix_optional=True)
     async def add_lm_prompt(self, event: AstrMessageEvent):
@@ -575,85 +678,144 @@ class ImageGenerationPlugin(Star):
         last_result = ""
         had_success = False
 
-        for i in range(count):
-            suffix = f" ({i+1}/{count})" if count > 1 else ""
-
-            # 余额不足
-            if i >= available:
-                if self.conf.get("enable_user_limit", True) and self.conf.get("enable_group_limit", False) and group_id:
-                    quota_msg = "❌ 本群和您的个人次数均已用完，请等待次日重置或向管理员索要。"
-                elif self.conf.get("enable_user_limit", True):
-                    quota_msg = "❌ 您的个人使用次数已用完，请等待次日重置或向管理员索要。"
-                elif self.conf.get("enable_group_limit", False) and group_id:
-                    quota_msg = "❌ 本群的使用次数已用完，请等待次日重置或向管理员索要。"
-                else:
-                    quota_msg = "❌ 次数已用完。"
-                if not is_llm_tool:
-                    await self._send_plain_direct(event, f"{quota_msg}{suffix}")
-                last_result = f"自拍失败，原因：{quota_msg}"
+        # 管理员：并发请求（彼此间隔2秒防抖启动），不扣费无竞态
+        # 非管理员：串行请求，无间隔
+        if is_master and count > 1:
+            # 并发启动，彼此间隔2秒防抖
+            tasks: list[asyncio.Task] = []
+            for i in range(count):
+                tasks.append(asyncio.create_task(self._selfie_single(i, count, available, event, images_to_send, prompt, model_index)))
                 if i < count - 1:
                     await asyncio.sleep(2)
-                continue
 
-            start_time = datetime.now()
-            res, model_name = await self.pipeline.execute(
-                images_to_send, prompt, model_index=model_index
-            )
-            elapsed = (datetime.now() - start_time).total_seconds()
-
-            image_results = self.sender.normalize_image_results(res)
-            if image_results:
-                deduction_error = await self.usage_guard.deduct_after_success(event, is_master)
-                if deduction_error:
+            for i, task in enumerate(tasks):
+                kind, suffix, payload = await task
+                if kind == "quota":
+                    quota_msg = payload
                     if not is_llm_tool:
-                        await self._send_plain_direct(event, f"{deduction_error}{suffix}")
-                    last_result = f"自拍失败，原因：{deduction_error}"
-                    if i < count - 1:
-                        await asyncio.sleep(2)
+                        await self._send_plain_direct(event, f"{quota_msg}{suffix}")
+                    last_result = f"自拍失败，原因：{quota_msg}"
                     continue
-                if is_master:
-                    remaining_str = "管理员剩余次数: ∞"
-                else:
-                    parts_r = []
-                    if self.conf.get("enable_user_limit", True):
-                        parts_r.append(f"个人剩余次数: {self.persistence.get_user_count(event.get_sender_id())}")
-                    if self.conf.get("enable_group_limit", False) and group_id:
-                        parts_r.append(f"本群剩余次数: {self.persistence.get_group_count(group_id)}")
-                    remaining_str = " | ".join(parts_r) if parts_r else ""
-                caption_text = " | ".join(part for part in [
-                    f"✅ 生成成功 ({elapsed:.2f}s)",
-                    f"人设: {persona_name}",
-                    f"风格: {style_name}",
-                    remaining_str,
-                    f"模型: {model_name}" if model_name else "",
-                ] if part) + suffix
-                logger.info(caption_text)
-                async for msg in self.sender.yield_success_images(
-                    event=event, images=image_results, caption_text=caption_text,
-                    concise_mode=concise, request_source=request_source,
-                ):
-                    await event.send(msg)
-                last_result = f"已成功为「{persona_name}」生成自拍（{elapsed:.1f}s），已发送给用户。"
-                had_success = True
-            else:
-                err = str(res)
-                if not is_llm_tool:
-                    if model_index is not None:
-                        await self._send_plain_direct(event, f"❌ 指定模型生成失败 ({elapsed:.2f}s)\n原因: {err}{suffix}")
-                    elif concise and err.startswith("所有 API 均失败"):
-                        await self._send_plain_direct(event, f"❌ 生成失败 ({elapsed:.2f}s)\n原因: 所有API均失败{suffix}")
-                    else:
-                        await self._send_plain_direct(event, f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {err}{suffix}")
-                last_result = f"自拍失败，原因：{err}"
 
-            # 防抖间隔
-            if i < count - 1:
-                await asyncio.sleep(2)
+                res, model_name, elapsed = payload
+                image_results = self.sender.normalize_image_results(res)
+                if image_results:
+                    # 管理员不扣费，无 deduction_error
+                    remaining_str = "管理员剩余次数: ∞"
+                    caption_text = " | ".join(part for part in [
+                        f"✅ 生成成功 ({elapsed:.2f}s)",
+                        f"人设: {persona_name}",
+                        f"风格: {style_name}",
+                        remaining_str,
+                        f"模型: {model_name}" if model_name else "",
+                    ] if part) + suffix
+                    logger.info(caption_text)
+                    async for msg in self.sender.yield_success_images(
+                        event=event, images=image_results, caption_text=caption_text,
+                        concise_mode=concise, request_source=request_source,
+                    ):
+                        await event.send(msg)
+                    last_result = f"已成功为「{persona_name}」生成自拍（{elapsed:.1f}s），已发送给用户。"
+                    had_success = True
+                else:
+                    err = str(res)
+                    if not is_llm_tool:
+                        if model_index is not None:
+                            await self._send_plain_direct(event, f"❌ 指定模型生成失败 ({elapsed:.2f}s)\n原因: {err}{suffix}")
+                        elif concise and err.startswith("所有 API 均失败"):
+                            await self._send_plain_direct(event, f"❌ 生成失败 ({elapsed:.2f}s)\n原因: 所有API均失败{suffix}")
+                        else:
+                            await self._send_plain_direct(event, f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {err}{suffix}")
+                    last_result = f"自拍失败，原因：{err}"
+        else:
+            # 串行
+            for i in range(count):
+                suffix = f" ({i+1}/{count})" if count > 1 else ""
+
+                # 余额不足
+                if i >= available:
+                    quota_msg = self._build_quota_msg(group_id)
+                    if not is_llm_tool:
+                        await self._send_plain_direct(event, f"{quota_msg}{suffix}")
+                    last_result = f"自拍失败，原因：{quota_msg}"
+                    continue
+
+                start_time = datetime.now()
+                res, model_name = await self.pipeline.execute(
+                    images_to_send, prompt, model_index=model_index
+                )
+                elapsed = (datetime.now() - start_time).total_seconds()
+
+                image_results = self.sender.normalize_image_results(res)
+                if image_results:
+                    deduction_error = await self.usage_guard.deduct_after_success(event, is_master)
+                    if deduction_error:
+                        if not is_llm_tool:
+                            await self._send_plain_direct(event, f"{deduction_error}{suffix}")
+                        last_result = f"自拍失败，原因：{deduction_error}"
+                        continue
+                    if is_master:
+                        remaining_str = "管理员剩余次数: ∞"
+                    else:
+                        parts_r = []
+                        if self.conf.get("enable_user_limit", True):
+                            parts_r.append(f"个人剩余次数: {self.persistence.get_user_count(event.get_sender_id())}")
+                        if self.conf.get("enable_group_limit", False) and group_id:
+                            parts_r.append(f"本群剩余次数: {self.persistence.get_group_count(group_id)}")
+                        remaining_str = " | ".join(parts_r) if parts_r else ""
+                    caption_text = " | ".join(part for part in [
+                        f"✅ 生成成功 ({elapsed:.2f}s)",
+                        f"人设: {persona_name}",
+                        f"风格: {style_name}",
+                        remaining_str,
+                        f"模型: {model_name}" if model_name else "",
+                    ] if part) + suffix
+                    logger.info(caption_text)
+                    async for msg in self.sender.yield_success_images(
+                        event=event, images=image_results, caption_text=caption_text,
+                        concise_mode=concise, request_source=request_source,
+                    ):
+                        await event.send(msg)
+                    last_result = f"已成功为「{persona_name}」生成自拍（{elapsed:.1f}s），已发送给用户。"
+                    had_success = True
+                else:
+                    err = str(res)
+                    if not is_llm_tool:
+                        if model_index is not None:
+                            await self._send_plain_direct(event, f"❌ 指定模型生成失败 ({elapsed:.2f}s)\n原因: {err}{suffix}")
+                        elif concise and err.startswith("所有 API 均失败"):
+                            await self._send_plain_direct(event, f"❌ 生成失败 ({elapsed:.2f}s)\n原因: 所有API均失败{suffix}")
+                        else:
+                            await self._send_plain_direct(event, f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {err}{suffix}")
+                    last_result = f"自拍失败，原因：{err}"
 
         # 批量模式：只要有任意一次成功，就视为整体成功，不触发 LLM 失败解释
         if had_success:
             return last_result
         return last_result if last_result else "自拍失败，原因：未知错误"
+
+    async def _selfie_single(
+        self,
+        i: int,
+        count: int,
+        available: int,
+        event: AstrMessageEvent,
+        images_to_send: list,
+        prompt: str,
+        model_index: Optional[int],
+    ):
+        """单次自拍生图任务，供并发使用。返回 (kind, suffix, payload)。"""
+        suffix = f" ({i+1}/{count})" if count > 1 else ""
+        if i >= available:
+            group_id = event.get_group_id()
+            return ("quota", suffix, self._build_quota_msg(group_id))
+
+        start_time = datetime.now()
+        res, model_name = await self.pipeline.execute(
+            images_to_send, prompt, model_index=model_index
+        )
+        elapsed = (datetime.now() - start_time).total_seconds()
+        return ("result", suffix, (res, model_name, elapsed))
 
     async def _run_selfie(
         self,
