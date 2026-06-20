@@ -262,6 +262,7 @@ class ImageGenerationPlugin(Star):
         display_name: str | None = None,
         request_source: Literal["command", "llm_tool"] = "command",
         count: int = 1,
+        model_index: Optional[int] = None,
     ):
         if not self.pipeline or not self.sender or not self.usage_guard:
             yield event.plain_result("❌ 插件尚未完成初始化，请稍后再试。")
@@ -358,7 +359,9 @@ class ImageGenerationPlugin(Star):
                 continue
 
             start_time = datetime.now()
-            res, model_name = await self.pipeline.execute(images_to_process, prompt)
+            res, model_name = await self.pipeline.execute(
+                images_to_process, prompt, model_index=model_index
+            )
             elapsed = (datetime.now() - start_time).total_seconds()
 
             image_results = self.sender.normalize_image_results(res)
@@ -422,7 +425,12 @@ class ImageGenerationPlugin(Star):
                 else:
                     yield event.chain_result([video_component, Plain(caption_text)])
             else:
-                if concise_mode and str(res).startswith("所有 API 均失败"):
+                if model_index is not None:
+                    # 指定模型模式：pipeline.execute 已返回带模型名的失败信息
+                    yield event.plain_result(
+                        f"❌ 指定模型生成失败 ({elapsed:.2f}s)\n原因: {res}{suffix}"
+                    )
+                elif concise_mode and str(res).startswith("所有 API 均失败"):
                     yield event.plain_result(
                         f"❌ 生成失败 ({elapsed:.2f}s)\n原因: 所有API均失败{suffix}"
                     )
@@ -487,6 +495,7 @@ class ImageGenerationPlugin(Star):
         style_id_override: str = "",
         is_llm_tool: bool = False,
         count: int = 1,
+        model_index: Optional[int] = None,
     ) -> str:
         """执行自拍生图，返回状态字符串。图片通过 event.send 直接发送。"""
         if not self.pipeline or not self.sender or not self.usage_guard:
@@ -575,7 +584,9 @@ class ImageGenerationPlugin(Star):
                 continue
 
             start_time = datetime.now()
-            res, model_name = await self.pipeline.execute(images_to_send, prompt)
+            res, model_name = await self.pipeline.execute(
+                images_to_send, prompt, model_index=model_index
+            )
             elapsed = (datetime.now() - start_time).total_seconds()
 
             image_results = self.sender.normalize_image_results(res)
@@ -615,7 +626,9 @@ class ImageGenerationPlugin(Star):
             else:
                 err = str(res)
                 if not is_llm_tool:
-                    if concise and err.startswith("所有 API 均失败"):
+                    if model_index is not None:
+                        await self._send_plain_direct(event, f"❌ 指定模型生成失败 ({elapsed:.2f}s)\n原因: {err}{suffix}")
+                    elif concise and err.startswith("所有 API 均失败"):
                         await self._send_plain_direct(event, f"❌ 生成失败 ({elapsed:.2f}s)\n原因: 所有API均失败{suffix}")
                     else:
                         await self._send_plain_direct(event, f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {err}{suffix}")
@@ -637,9 +650,10 @@ class ImageGenerationPlugin(Star):
         style_id_override: str = "",
         is_llm_tool: bool = False,
         count: int = 1,
+        model_index: Optional[int] = None,
     ):
         """命令模式专用 async generator 包装。"""
-        result = await self._exec_selfie(event, action, style_id_override, is_llm_tool, count)
+        result = await self._exec_selfie(event, action, style_id_override, is_llm_tool, count, model_index)
         # 命令模式下错误已在 _exec_selfie 里直接发送，此处无需再 yield
         _ = result  # suppress unused variable warning
         return

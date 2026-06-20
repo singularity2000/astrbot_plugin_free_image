@@ -54,7 +54,7 @@ class CommandHandlers:
         template_key = str(node.get("__template_key", "")).strip()
         return template_key or "未命名模型"
 
-    def format_model_pipeline_message(self, prefix: str = "") -> str:
+    def format_model_pipeline_message(self, prefix: str = "", is_admin: bool = True) -> str:
         pipeline_config = self.get_api_pipeline_config()
         lines = []
         if prefix:
@@ -69,13 +69,11 @@ class CommandHandlers:
         else:
             lines.append("当前 API 管线为空，请先在 WebUI 配置 api_pipeline。")
 
-        lines.extend(
-            [
-                "",
-                "画图模型 置顶 <序号> 将该模型置顶到管线顶部",
-                "画图模型 开启/关闭 <序号> 将该模型启用或关闭",
-            ]
-        )
+        lines.append("")
+        if is_admin:
+            lines.append("画图模型 置顶 <序号> 将该模型置顶到管线顶部")
+            lines.append("画图模型 开启/关闭 <序号> 将该模型启用或关闭")
+        lines.append("文生图-<序号> 指定单个模型生图（图生图、模板、自拍同理）")
         return "\n".join(lines)
 
     @staticmethod
@@ -102,20 +100,26 @@ class CommandHandlers:
 
     async def handle_model_pipeline_command(self, event: AstrMessageEvent, raw_args: str):
         p = self.plugin
-        if not p.is_global_admin(event):
+        is_admin = p.is_global_admin(event)
+
+        action, index = self.parse_model_command(raw_args)
+        pipeline_config = self.get_api_pipeline_config()
+
+        # 无参：所有人可看列表
+        if action is None:
+            yield event.plain_result(self.format_model_pipeline_message(is_admin=is_admin))
+            event.stop_event()
+            return
+
+        # 带参（置顶/开启/关闭）：仅管理员
+        if not is_admin:
             yield event.plain_result(self.admin_denied_message())
             event.stop_event()
             return
 
-        action, index = self.parse_model_command(raw_args)
-        pipeline_config = self.get_api_pipeline_config()
-        if action is None:
-            yield event.plain_result(self.format_model_pipeline_message())
-            event.stop_event()
-            return
         if not action or index is None or index < 1 or index > len(pipeline_config):
             yield event.plain_result(
-                self.format_model_pipeline_message("命令格式或参数错误，请重试。")
+                self.format_model_pipeline_message("命令格式或参数错误，请重试。", is_admin=True)
             )
             event.stop_event()
             return
@@ -130,14 +134,36 @@ class CommandHandlers:
             pipeline_config[node_index]["enabled"] = False
         else:
             yield event.plain_result(
-                self.format_model_pipeline_message("命令格式或参数错误，请重试。")
+                self.format_model_pipeline_message("命令格式或参数错误，请重试。", is_admin=True)
             )
             event.stop_event()
             return
 
         self.save_and_rebuild_pipeline()
-        yield event.plain_result(self.format_model_pipeline_message("操作成功。"))
+        yield event.plain_result(self.format_model_pipeline_message("操作成功。", is_admin=True))
         event.stop_event()
+
+    def _parse_model_index_command(self, text: str, candidates: list[str]) -> tuple[str | None, int | None, str]:
+        """解析 <命令>-<序号> [剩余参数] 模式。
+        返回 (matched_cmd, model_index, remaining_text)。
+        matched_cmd 为 None 表示未命中；model_index 为 None 表示未命中序号。
+        candidates 必须按长度降序传入，避免前缀冲突。
+        """
+        for cmd in candidates:
+            if not text.startswith(cmd):
+                continue
+            rest = text[len(cmd):]
+            # rest 必须以 "-<数字>" 开头，后面跟空格或结束
+            m = re.match(r"^-(\d+)(?:\s|$)", rest)
+            if not m:
+                continue
+            idx = int(m.group(1))
+            if idx < 1:
+                continue
+            # 剥离 "<命令>-<序号>"，保留剩余文本
+            remaining = rest[m.end():].strip()
+            return cmd, idx, remaining
+        return None, None, text
 
     async def on_image_gen_request(self, event: AstrMessageEvent):
         p = self.plugin
@@ -154,6 +180,89 @@ class CommandHandlers:
             ):
                 yield result
             return
+
+        # --- <命令>-<序号> 模式解析 ---
+        candidates = ["文生图", "图生图", "自拍"] + list(p.prompt_map.keys())
+        candidates_sorted = sorted(set(candidates), key=len, reverse=True)
+        matched_cmd, model_index, remaining = self._parse_model_index_command(
+            text, candidates_sorted
+        )
+
+        if matched_cmd is not None:
+            pipeline_config = self.get_api_pipeline_config()
+            is_admin = p.is_global_admin(event)
+            # 序号超范围：按你确认的规则，报"命令格式或参数错误"+列表
+            if model_index > len(pipeline_config):
+                yield event.plain_result(
+                    self.format_model_pipeline_message(
+                        prefix="命令格式或参数错误，请重试。", is_admin=is_admin
+                    )
+                )
+                event.stop_event()
+                return
+            node = pipeline_config[model_index - 1]
+            if not node.get("enabled", True):
+                yield event.plain_result(
+                    f"模型 {model_index}🔴{self.get_model_display_name(node)} 已关闭，请选择其他模型。"
+                )
+                event.stop_event()
+                return
+
+            if matched_cmd == "文生图":
+                if not remaining:
+                    yield event.plain_result(
+                        f"请提供文生图的描述。用法: 文生图-{model_index} <描述>"
+                    )
+                    event.stop_event()
+                    return
+                async for res in p.handle_image_gen_logic(
+                    event, remaining, is_i2i=False,
+                    request_source="command", model_index=model_index,
+                ):
+                    yield res
+                event.stop_event()
+                return
+
+            if matched_cmd == "图生图":
+                if not remaining:
+                    yield event.plain_result(
+                        f"请提供图生图的描述。用法: 图生图-{model_index} <描述>（并发送或引用图片）"
+                    )
+                    event.stop_event()
+                    return
+                async for res in p.handle_image_gen_logic(
+                    event, remaining, is_i2i=True,
+                    request_source="command", model_index=model_index,
+                ):
+                    yield res
+                event.stop_event()
+                return
+
+            if matched_cmd == "自拍":
+                async for _ in p._run_selfie(
+                    event, remaining, is_llm_tool=False, model_index=model_index,
+                ):
+                    yield _
+                event.stop_event()
+                return
+
+            # 模板触发
+            if matched_cmd in p.prompt_map:
+                base_prompt = p.prompt_map.get(matched_cmd)
+                if base_prompt is None:
+                    return
+                user_prompt = f"{base_prompt} {remaining}" if remaining else base_prompt
+                display_name = f"{matched_cmd}-{model_index} {remaining}".strip()
+                async for res in p.handle_image_gen_logic(
+                    event, user_prompt, is_i2i=True,
+                    display_name=display_name, request_source="command",
+                    model_index=model_index,
+                ):
+                    yield res
+                event.stop_event()
+                return
+
+        # --- 原有：无序号模式 ---
         parts = text.split(maxsplit=1)
         cmd = parts[0].strip()
         extra_text = parts[1].strip() if len(parts) > 1 else ""

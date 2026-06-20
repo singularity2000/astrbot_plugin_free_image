@@ -49,13 +49,40 @@ class ImageGenPipeline:
         return None
 
     async def execute(
-        self, image_bytes_list: List[bytes], prompt: str
+        self,
+        image_bytes_list: List[bytes],
+        prompt: str,
+        model_index: Optional[int] = None,
     ) -> tuple[Union[bytes, list[bytes], str, dict[str, str]], Optional[str]]:
         """
         依次调用管线中已启用的 Provider。
         返回 (result, model_name)。
         其中 result 为 bytes / list[bytes] / dict 表示成功媒体结果，str 表示全部失败（汇总错误信息）。
+
+        当 model_index 不为 None 时，只调用指定序号（1-based）的 Provider，不回退。
+        调用方应已在调用前校验过序号范围和 enabled 状态；此处再做二次防御。
         """
+        if model_index is not None:
+            if model_index < 1 or model_index > len(self.providers):
+                return (
+                    f"模型序号 {model_index} 超出范围（1-{len(self.providers)}）。",
+                    None,
+                )
+            provider = self.providers[model_index - 1]
+            if not provider.enabled:
+                model_name = provider.node.get("model") or provider.name
+                return (
+                    f"模型 {model_index}🔴{model_name} 已关闭，请选择其他模型。",
+                    None,
+                )
+            logger.info(f"[Pipeline] 指定模型: {provider.name}")
+            result = await provider.generate(image_bytes_list, prompt)
+            if isinstance(result, (bytes, list, dict)):
+                model_name = provider.node.get("model")
+                return result, str(model_name) if model_name else None
+            logger.warning(f"[Pipeline] 指定模型 {provider.name} 失败: {result}")
+            return f"指定模型 {provider.name} 失败: {result}", None
+
         errors: List[str] = []
         for provider in self.providers:
             if not provider.enabled:
