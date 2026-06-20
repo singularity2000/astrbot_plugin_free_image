@@ -202,16 +202,16 @@ class CommandHandlers:
                 return
             node = pipeline_config[model_index - 1]
             if not node.get("enabled", True):
-                yield event.plain_result(
-                    f"模型 {model_index}🔴{self.get_model_display_name(node)} 已关闭，请选择其他模型。"
+                yield p._quoted_plain_result(
+                    event, f"模型 {model_index}🔴{self.get_model_display_name(node)} 已关闭，请选择其他模型。"
                 )
                 event.stop_event()
                 return
 
             if matched_cmd == "文生图":
                 if not remaining:
-                    yield event.plain_result(
-                        f"请提供文生图的描述。用法: 文生图-{model_index} <描述>"
+                    yield p._quoted_plain_result(
+                        event, f"请提供文生图的描述。用法: 文生图-{model_index} <描述>"
                     )
                     event.stop_event()
                     return
@@ -225,8 +225,8 @@ class CommandHandlers:
 
             if matched_cmd == "图生图":
                 if not remaining:
-                    yield event.plain_result(
-                        f"请提供图生图的描述。用法: 图生图-{model_index} <描述>（并发送或引用图片）"
+                    yield p._quoted_plain_result(
+                        event, f"请提供图生图的描述。用法: 图生图-{model_index} <描述>（并发送或引用图片）"
                     )
                     event.stop_event()
                     return
@@ -294,7 +294,7 @@ class CommandHandlers:
         if prompt.startswith("文生图"):
             prompt = prompt.removeprefix("文生图").strip()
         if not prompt:
-            yield event.plain_result("请提供文生图的描述。用法: #文生图 <描述>")
+            yield p._quoted_plain_result(event, "请提供文生图的描述。用法: #文生图 <描述>")
             return
         async for res in p.handle_image_gen_logic(
             event, prompt, is_i2i=False, request_source="command"
@@ -308,8 +308,8 @@ class CommandHandlers:
             p._get_plain_message_text(event, strip_wake_prefix=True), "图生图"
         )
         if not prompt:
-            yield event.plain_result(
-                "请提供图生图的描述。用法: #图生图 <描述>（并发送或引用图片）"
+            yield p._quoted_plain_result(
+                event, "请提供图生图的描述。用法: #图生图 <描述>（并发送或引用图片）"
             )
             return
         async for res in p.handle_image_gen_logic(

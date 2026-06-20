@@ -159,7 +159,7 @@ class ImageGenerationPlugin(Star):
                 async for result in self.handle_image_gen_logic(
                     event, prompt, is_i2i=is_i2i, request_source="llm_tool", count=count
                 ):
-                    await self._send_with_auto_quote(event, result)
+                    await self._send_with_auto_quote(event, result, request_source="llm_tool")
             except Exception as e:
                 logger.error(f"Background image generation failed: {e}")
 
@@ -184,32 +184,44 @@ class ImageGenerationPlugin(Star):
             yield res
 
     def _should_auto_quote(self, event: AstrMessageEvent) -> bool:
-        """读取框架全局 reply_with_quote 开关。
-        模拟 yield 管道的自动引用回复行为，供 event.send 发送的文本提示使用。
+        """已废弃：保留方法体以兼容潜在的外部调用。
+        文案引用现在由 _send_plain_direct / _send_with_auto_quote 无条件处理，
+        不再跟随主框架 reply_with_quote 全局开关。图片引用由 quote_reply_mode 控制。
         """
-        try:
-            platform_settings = self.context.get_config().get("platform_settings", {})
-            return bool(platform_settings.get("reply_with_quote", True))
-        except Exception:
-            return True
+        return True
+
+    def _quoted_plain_result(self, event: AstrMessageEvent, text: str):
+        """生成带 Reply 的纯文本结果，绕过主框架 reply_with_quote 装饰。
+        用于 handle_image_gen_logic 里的状态/失败/配额提示，保证无论全局开关如何都引用原消息。
+        """
+        return event.chain_result(
+            [Reply(id=event.message_obj.message_id), Plain(text)]
+        )
 
     async def _send_plain_direct(
         self, event: AstrMessageEvent, text: str, with_reply: bool = True
     ) -> None:
         chain: list = [Plain(text)]
-        if with_reply and self._should_auto_quote(event):
+        if with_reply:
             chain.insert(0, Reply(id=event.message_obj.message_id))
         await event.send(MessageChain(chain=chain))
 
-    async def _send_with_auto_quote(self, event: AstrMessageEvent, message) -> None:
-        """对 event.send 的消息模拟 yield 管道的自动引用回复行为。
-        若全局 reply_with_quote 开启，且 chain 为纯 Plain/Image 且无 Reply 组件，则插入 Reply。
+    async def _send_with_auto_quote(
+        self,
+        event: AstrMessageEvent,
+        message,
+        request_source: Literal["command", "llm_tool"] = "llm_tool",
+    ) -> None:
+        """对 event.send 发送的文案消息模拟 yield 管道的引用回复行为。
+        仅处理纯 Plain 文案（开始/失败/配额提示等），无条件插入 Reply，
+        不受 quote_reply_mode 和主框架 reply_with_quote 影响——quote_reply_mode 只作用于图片本身，
+        由 sender.yield_success_images 负责。含 Image 的消息和已有 Reply 的消息保持原样。
         """
         chain = getattr(message, "chain", None)
         if chain:
             has_reply = any(isinstance(seg, Reply) for seg in chain)
-            can_decorate = all(isinstance(item, (Plain, Image)) for item in chain)
-            if not has_reply and can_decorate and self._should_auto_quote(event):
+            is_plain_only = all(isinstance(item, Plain) for item in chain)
+            if not has_reply and is_plain_only:
                 chain.insert(0, Reply(id=event.message_obj.message_id))
         await event.send(message)
 
@@ -265,7 +277,7 @@ class ImageGenerationPlugin(Star):
         model_index: Optional[int] = None,
     ):
         if not self.pipeline or not self.sender or not self.usage_guard:
-            yield event.plain_result("❌ 插件尚未完成初始化，请稍后再试。")
+            yield self._quoted_plain_result(event, "❌ 插件尚未完成初始化，请稍后再试。")
             return
 
         sender_id = event.get_sender_id()
@@ -274,7 +286,7 @@ class ImageGenerationPlugin(Star):
 
         # --- 权限和次数检查 ---
         if quota_error := await self.usage_guard.check_can_use(event, is_master):
-            yield event.plain_result(quota_error)
+            yield self._quoted_plain_result(event, quota_error)
             return
         if quota_error == "":
             return
@@ -284,15 +296,15 @@ class ImageGenerationPlugin(Star):
         images_to_process = []
         if is_i2i:
             if not self.iwf or not (img_bytes_list := await self.iwf.get_images(event)):
-                yield event.plain_result("请发送或引用一张图片。")
+                yield self._quoted_plain_result(event, "请发送或引用一张图片。")
                 return
 
             MAX_IMAGES = 5
             original_count = len(img_bytes_list)
             if original_count > MAX_IMAGES:
                 images_to_process = img_bytes_list[:MAX_IMAGES]
-                yield event.plain_result(
-                    f"🎨 检测到 {original_count} 张图片，已选取前 {MAX_IMAGES} 张…"
+                yield self._quoted_plain_result(
+                    event, f"🎨 检测到 {original_count} 张图片，已选取前 {MAX_IMAGES} 张…"
                 )
             else:
                 images_to_process = img_bytes_list
@@ -321,7 +333,7 @@ class ImageGenerationPlugin(Star):
             except Exception as e:
                 logger.debug(f"简洁模式贴表情失败: {e}")
         else:
-            yield event.plain_result(start_msg)
+            yield self._quoted_plain_result(event, start_msg)
 
         # --- 批量前余额检查 ---
         # count > 1 时，提前查余额，避免白嫖 API
@@ -353,7 +365,7 @@ class ImageGenerationPlugin(Star):
                     quota_msg = "❌ 您的个人使用次数已用完，请等待次日重置或向管理员索要。"
                 elif self.conf.get("enable_group_limit", False) and group_id:
                     quota_msg = "❌ 本群的使用次数已用完，请等待次日重置或向管理员索要。"
-                yield event.plain_result(f"{quota_msg}{suffix}")
+                yield self._quoted_plain_result(event, f"{quota_msg}{suffix}")
                 if i < count - 1:
                     await asyncio.sleep(2)
                 continue
@@ -367,7 +379,7 @@ class ImageGenerationPlugin(Star):
             image_results = self.sender.normalize_image_results(res)
             if image_results:
                 if deduction_error := await self.usage_guard.deduct_after_success(event, is_master):
-                    yield event.plain_result(f"{deduction_error}{suffix}")
+                    yield self._quoted_plain_result(event, f"{deduction_error}{suffix}")
                     if i < count - 1:
                         await asyncio.sleep(2)
                     continue
@@ -392,7 +404,7 @@ class ImageGenerationPlugin(Star):
                     yield msg
             elif isinstance(res, dict) and res.get("type") == "video" and res.get("url"):
                 if deduction_error := await self.usage_guard.deduct_after_success(event, is_master):
-                    yield event.plain_result(f"{deduction_error}{suffix}")
+                    yield self._quoted_plain_result(event, f"{deduction_error}{suffix}")
                     if i < count - 1:
                         await asyncio.sleep(2)
                     continue
@@ -427,15 +439,15 @@ class ImageGenerationPlugin(Star):
             else:
                 if model_index is not None:
                     # 指定模型模式：pipeline.execute 已返回带模型名的失败信息
-                    yield event.plain_result(
-                        f"❌ 指定模型生成失败 ({elapsed:.2f}s)\n原因: {res}{suffix}"
+                    yield self._quoted_plain_result(
+                        event, f"❌ 指定模型生成失败 ({elapsed:.2f}s)\n原因: {res}{suffix}"
                     )
                 elif concise_mode and str(res).startswith("所有 API 均失败"):
-                    yield event.plain_result(
-                        f"❌ 生成失败 ({elapsed:.2f}s)\n原因: 所有API均失败{suffix}"
+                    yield self._quoted_plain_result(
+                        event, f"❌ 生成失败 ({elapsed:.2f}s)\n原因: 所有API均失败{suffix}"
                     )
                 else:
-                    yield event.plain_result(f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {res}{suffix}")
+                    yield self._quoted_plain_result(event, f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {res}{suffix}")
 
             # 防抖间隔
             if i < count - 1:
