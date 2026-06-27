@@ -1,8 +1,8 @@
 # 图片生成插件 (astrbot_plugin_free_image)
 
-`astrbot_plugin_free_image` 是一个强大的面向 AstrBot 的图片生成插件，支持文生图、图生图、预设模板生图、LLM 函数工具调用、多模型回退、配额管理和 沉浸式自拍功能。
+`astrbot_plugin_free_image` 是一个面向 AstrBot 的图片生成插件，支持文生图、图生图、预设模板生图、LLM 函数工具调用、多模型回退、配额管理、生成历史、图片缓存和沉浸式自拍功能。
 
-插件的核心特色是“API 管线”：你可以在 WebUI 中配置多个图片生成节点，插件会按顺序调用，当前节点失败时自动回退到下一个节点。插件还支持自拍功能，支持高度自定义自拍人设和自拍风格，赋予机器人更生动的交互体验。另外，插件内置了逆向 API，支持调用“大香蕉”无限次免费生成不带显式 Gemini 水印的 1K、2K、4K 图片。
+插件的核心特色是“API 管线”：你可以在 WebUI 中配置多个图片生成节点，插件会按顺序调用，当前节点失败时自动回退到下一个节点。插件还支持高度自定义自拍人设和自拍风格，赋予机器人更生动的交互体验。另外，插件内置了 Vertex AI 匿名逆向节点，可用性受上游服务状态影响。
 
 ## 主要特性
 
@@ -18,6 +18,7 @@
 | Key 轮换 | 每个 Provider 节点可配置多个 `api_keys`，运行时自动 Round-robin 使用。 |
 | 退避重试 | 对 429、资源耗尽、网络波动等错误进行重试和退避。 |
 | 权限配额 | 支持管理员免限制、用户/群黑白名单、用户/群每日额度、永久次数和签到奖励。 |
+| 历史与缓存 | 记录生图历史；可选保存生成图片缓存，并支持按大小、时间和数量自动清理。 |
 | LLM 工具 | 注册 `image_generation` 工具，允许模型在对话中主动调用生图能力。 |
 | 人设自拍 | 配置好自拍人设后，支持 `#自拍` 命令和 `send_selfie` LLM 工具，让机器人用固定形象出镜。 |
 | QQ 优化 | 群聊简洁模式可贴表情，成功后只发送图片；也支持引用回复和多图分条策略。 |
@@ -40,6 +41,10 @@
 | `quote_reply_mode` | 控制生成成功后的图片消息是否引用回复。 |
 | `multi_image_send_mode` | 控制多图结果是否合并发送或分条发送。 |
 | `download_timeout` | 下载用户图片、头像或远程结果图片的超时时间。 |
+| `enable_image_cache` | 是否保存成功生成的图片缓存。关闭后仍会记录生图历史，但不保存图片文件。 |
+| `image_cache_max_size_mb` | 最大缓存大小（MB），留空或 0 表示不限制。 |
+| `image_cache_max_age_hours` | 最长缓存保存时间（小时），留空或 0 表示不限制。 |
+| `image_cache_max_count` | 最多保存缓存图片张数，留空或 0 表示不限制。 |
 | `rate_limit_seconds` | 非管理员全局生图冷却时间。 |
 | `llm_tool_description` | LLM 看到的普通画图工具描述。 |
 | `llm_prompt_description` | LLM 构造最终生图 Prompt 时参考的描述。 |
@@ -109,6 +114,7 @@
 | `#画图模型 置顶 <序号>` | 将指定节点置顶。 | `#画图模型 置顶 3` |
 | `#画图模型 开启 <序号>` | 启用指定节点。 | `#画图模型 开启 2` |
 | `#画图模型 关闭 <序号>` | 关闭指定节点。 | `#画图模型 关闭 2` |
+| `#画图缓存 状态/开启/关闭/清理` | 查看、开关或清理生成图片缓存。清理会删除全部已保存缓存图片，不删除生图历史记录。 | `#画图缓存 状态` |
 | `#画图简洁模式 开启/关闭` | 切换简洁模式，等效于 WebUI 的 `concise_mode` 开关。 | `#画图简洁模式 开启` |
 | `#画图增加用户次数` | 给用户增加永久次数，支持 @ 或 QQ 号。 | `#画图增加用户次数 @某人 10` |
 | `#画图增加群组次数` | 给群组增加永久次数。 | `#画图增加群组次数 987654 50` |
@@ -287,6 +293,7 @@ Provider 行为说明：
 ├─ commands.py                     # 聊天命令处理逻辑：画图、模型管理、次数、自拍人设/风格管理
 ├─ pipeline.py                     # 图片生成 Provider 管线，负责多节点顺序调用和失败回退
 ├─ quota.py                        # 权限、冷却、配额、签到和 JSON 持久化
+├─ history_cache.py                # 生图历史、图片缓存、Pages 偏好设置的持久化
 ├─ sender.py                       # 图片/视频发送策略、成功文案、引用回复、多图分条
 ├─ workflow.py                     # 用户图片、引用图、@头像、动图首帧等输入图片读取
 ├─ selfie.py                       # 自拍人设解析、风格选择、自拍 Prompt 拼接、参考图组合
@@ -298,6 +305,9 @@ Provider 行为说明：
 │  ├─ openai_responses.py          # OpenAI Responses API
 │  ├─ openai_compat_chat.py        # OpenAI Chat Completions 兼容端点
 │  └─ generic.py                   # SiliconFlow / BigModel 等通用图片接口
+├─ pages/                          # AstrBot Pages 页面资源
+│  └─ 插件配置/                    # 插件配置、统计、缓存和自拍管理页面
+├─ .astrbot-plugin/                # AstrBot 插件附加元数据
 ├─ _conf_schema.json               # AstrBot WebUI 配置项定义
 ├─ metadata.yaml                   # 插件元数据
 ├─ requirements.txt                # 插件依赖
@@ -308,12 +318,17 @@ Provider 行为说明：
 AstrBot 插件配置目录（data/config/）
 └─ astrbot_plugin_free_image_config.json      # WebUI 保存的插件配置，如 api_pipeline、配额、人设和风格模板
 
-AstrBot 插件独立数据目录（data/plugin_data/astrbot_plugin_free_image/）
+AstrBot 分配给本插件的数据目录（通常位于 data/plugin_data/astrbot_plugin_free_image/，以运行时实际路径为准）
 ├─ user_counts.json                # 用户永久次数
 ├─ group_counts.json               # 群组永久次数
 ├─ user_daily_counts.json          # 用户每日额度使用记录
 ├─ group_daily_counts.json         # 群组每日额度使用记录
 ├─ user_checkin.json               # 用户签到日期记录
+├─ generation_history.json         # 生图历史记录
+├─ pages_prefs.json                # Pages 用户偏好设置
+├─ cache/
+│  ├─ index.json                   # 缓存图片索引
+│  └─ images/                      # 已保存的生成图片缓存
 └─ selfie_personas/                # 命令添加的自拍人设参考图
    └─ <persona_id>/ref_*.png       # 某个自拍人设的参考图文件
 ```
@@ -322,7 +337,7 @@ AstrBot 插件独立数据目录（data/plugin_data/astrbot_plugin_free_image/�
 
 - `data/plugins/astrbot_plugin_free_image/` 是插件代码目录。
 - `data/config/astrbot_plugin_free_image_config.json` 是 WebUI 配置文件，保存用户显式配置。
-- `data/plugin_data/astrbot_plugin_free_image/` 是运行时数据目录，用于保存次数、签到和自拍参考图，便于卸载或迁移时统一处理。
+- AstrBot 分配给本插件的数据目录用于保存次数、签到、生图历史、缓存索引、缓存图片和自拍参考图，便于卸载或迁移时统一处理。
 
 ## 常见问题
 

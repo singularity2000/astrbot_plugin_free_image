@@ -469,6 +469,30 @@
         "hint": "下载用户发送的图片或下载生成结果时的超时时间（秒）。",
         "default": 60
     },
+        "enable_image_cache": {
+        "description": "【缓存】是否保存生成图片缓存",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，插件会把成功生成的图片保存到插件 data/cache 目录，并在 Pages 的统计和缓存图库中展示。关闭后只记录生图历史，不保存图片文件。"
+    },
+    "image_cache_max_size_mb": {
+        "description": "【缓存】最大缓存大小（MB）",
+        "type": "string",
+        "default": "",
+        "hint": "留空或填写 0 表示不限制。达到上限时会自动删除最旧的缓存图片。"
+    },
+    "image_cache_max_age_hours": {
+        "description": "【缓存】最长保存时间（小时）",
+        "type": "string",
+        "default": "",
+        "hint": "留空或填写 0 表示不限制。超过该时间的缓存图片会被自动清理。"
+    },
+    "image_cache_max_count": {
+        "description": "【缓存】最多保存图片张数",
+        "type": "string",
+        "default": "",
+        "hint": "留空或填写 0 表示不限制。达到上限时会自动删除最旧的缓存图片。"
+    },
     "user_whitelist": {
         "description": "【权限】用户白名单",
         "type": "list",

@@ -1,3 +1,5 @@
+AGENTS.md
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 providers/__pycache__/

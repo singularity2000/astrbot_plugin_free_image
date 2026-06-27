@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FreeImage 控制台</title>
+    <script>
+      (function () {
+        try {
+          var value = window.localStorage
+            ? window.localStorage.getItem("freeimage.theme")
+            : null;
+          if (value === "light" || value === "dark" || value === "system") {
+            document.documentElement.dataset.theme = value;
+          }
+        } catch (error) {
+          // AstrBot Pages runs inside a sandbox iframe where storage may be blocked.
+        }
+      })();
+    </script>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">FI</span>
+          <span>FreeImage</span>
+        </div>
+        <nav class="nav-list" aria-label="FreeImage 控制台">
+          <button class="nav-item active" data-tab="pipeline" type="button"><span>管线</span></button>
+          <button class="nav-item" data-tab="templates" type="button"><span>模板</span></button>
+          <button class="nav-item" data-tab="history" type="button"><span>统计</span></button>
+          <button class="nav-item" data-tab="cache" type="button"><span>缓存</span></button>
+          <button class="nav-item" data-tab="selfie" type="button"><span>自拍</span></button>
+        </nav>
+        <div class="theme-panel" aria-label="主题设置">
+          <span>主题</span>
+          <div class="theme-toggle">
+            <button data-theme-choice="system" type="button">跟随</button>
+            <button data-theme-choice="light" type="button">亮色</button>
+            <button data-theme-choice="dark" type="button">暗色</button>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <div id="page-status" class="page-status hidden" role="status" aria-live="polite"></div>
+        <section class="tab-panel active" data-panel="pipeline">
+          <div class="page-head">
+            <div>
+              <p class="eyebrow">Fallback rail</p>
+              <h1>生图管线</h1>
+            </div>
+            <div class="toolbar">
+              <button class="btn" id="add-pipeline" type="button">+ 添加节点</button>
+              <button class="btn primary" id="save-pipeline" type="button">保存管线</button>
+            </div>
+          </div>
+          <div class="rail-board">
+            <div class="rail-line" aria-hidden="true"></div>
+            <div id="pipeline-list" class="stack-list"></div>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-panel="templates">
+          <div class="page-head">
+            <div>
+              <p class="eyebrow">Prompt deck</p>
+              <h1>图生图模板</h1>
+            </div>
+            <div class="toolbar">
+              <button class="btn" id="add-template" type="button">+ 添加模板</button>
+              <button class="btn primary" id="save-templates" type="button">保存模板</button>
+            </div>
+          </div>
+          <div id="template-list" class="template-grid"></div>
+        </section>
+
+        <section class="tab-panel" data-panel="history">
+          <div class="page-head">
+            <div>
+              <p class="eyebrow">Generation ledger</p>
+              <h1>生图统计</h1>
+            </div>
+            <div class="toolbar">
+              <button class="btn" id="refresh-history" type="button">刷新</button>
+            </div>
+          </div>
+          <div class="metrics-row">
+            <div class="metric"><span id="metric-total">0</span><small>总记录</small></div>
+            <div class="metric"><span id="metric-today">0</span><small>今日成功</small></div>
+            <div class="metric"><span id="metric-avg">0s</span><small>平均耗时</small></div>
+            <div class="metric"><span id="metric-users">0</span><small>触发人</small></div>
+          </div>
+          <div class="analytics-grid">
+            <div class="chart-panel">
+              <div class="panel-title">模式分布</div>
+              <div id="mode-bars" class="bars"></div>
+            </div>
+            <div class="chart-panel">
+              <div class="panel-title">模型分布</div>
+              <div id="model-bars" class="bars"></div>
+            </div>
+          </div>
+          <div class="filter-bar">
+            <input id="filter-start" type="date" />
+            <input id="filter-end" type="date" />
+            <input id="filter-user" type="search" placeholder="触发人" />
+            <select id="filter-mode"></select>
+            <select id="filter-model"></select>
+            <button class="btn" id="apply-filters" type="button">筛选</button>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>触发人</th>
+                  <th>模式</th>
+                  <th>模型</th>
+                  <th>耗时</th>
+                  <th>完整提示词</th>
+                  <th>图片</th>
+                </tr>
+              </thead>
+              <tbody id="history-body"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-panel="cache">
+          <div class="page-head">
+            <div>
+              <p class="eyebrow">Cache contact sheet</p>
+              <h1>缓存图库</h1>
+            </div>
+            <div class="toolbar">
+              <label class="switch-row">
+                <input id="cache-enabled" type="checkbox" />
+                <span class="switch-ui"></span>
+                <span>保存缓存</span>
+              </label>
+              <button class="btn danger" id="clear-cache" type="button">清理缓存</button>
+            </div>
+          </div>
+          <div class="cache-settings">
+            <label>最大 MB<input id="cache-max-mb" type="number" min="0" step="1" /></label>
+            <label>最长小时<input id="cache-max-hours" type="number" min="0" step="1" /></label>
+            <label>最多张数<input id="cache-max-count" type="number" min="0" step="1" /></label>
+            <button class="btn primary" id="save-cache-config" type="button">保存限制</button>
+          </div>
+          <div class="cache-strip">
+            <div><strong id="cache-total">0</strong><span>张图片</span></div>
+            <div><strong id="cache-size">0 KB</strong><span>占用空间</span></div>
+            <label>每页
+              <select id="cache-page-size">
+                <option>12</option>
+                <option>24</option>
+                <option>48</option>
+                <option>96</option>
+              </select>
+            </label>
+          </div>
+          <div id="cache-grid" class="image-grid"></div>
+          <div class="pager">
+            <button class="btn" id="cache-prev" type="button">上一页</button>
+            <span id="cache-page-label">1 / 1</span>
+            <button class="btn" id="cache-next" type="button">下一页</button>
+          </div>
+        </section>
+
+        <section class="tab-panel" data-panel="selfie">
+          <div class="page-head">
+            <div>
+              <p class="eyebrow">Persona lab</p>
+              <h1>自拍人设</h1>
+            </div>
+            <div class="toolbar">
+              <button class="btn" id="add-persona" type="button">+ 添加人设</button>
+              <button class="btn primary" id="save-personas" type="button">保存人设</button>
+            </div>
+          </div>
+          <div class="selfie-layout">
+            <div class="persona-list" id="persona-list"></div>
+            <div class="editor-pane" id="persona-editor"></div>
+          </div>
+          <div class="style-head">
+            <div>
+              <p class="eyebrow">Style bank</p>
+              <h2>自拍风格</h2>
+            </div>
+            <div class="toolbar">
+              <button class="btn" id="add-style" type="button">+ 添加风格</button>
+              <button class="btn primary" id="save-styles" type="button">保存风格</button>
+            </div>
+          </div>
+          <div class="style-controls">
+            <label>风格模式<select id="style-mode"></select></label>
+            <label>指定风格 ID<input id="style-selected-id" type="text" /></label>
+          </div>
+          <div id="style-list" class="style-list"></div>
+        </section>
+      </main>
+    </div>
+
+    <div id="provider-modal" class="modal" aria-hidden="true">
+      <div class="modal-panel">
+        <div class="modal-head">
+          <h2>选择提供商</h2>
+          <button class="icon-btn" data-close-modal type="button">×</button>
+        </div>
+        <div id="provider-options" class="provider-grid"></div>
+      </div>
+    </div>
+
+    <div id="confirm-modal" class="modal confirm-modal" aria-hidden="true">
+      <div class="modal-panel confirm-panel" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+        <div class="modal-head">
+          <h2 id="confirm-title">确认操作</h2>
+        </div>
+        <p id="confirm-message" class="confirm-message"></p>
+        <div class="confirm-actions">
+          <button class="btn" id="confirm-cancel" type="button">取消</button>
+          <button class="btn danger" id="confirm-ok" type="button">删除</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="slideshow" class="slideshow" aria-hidden="true">
+      <button class="slide-close" id="slide-close" type="button">×</button>
+      <button class="slide-nav prev" id="slide-prev" type="button">‹</button>
+      <figure class="slide-figure">
+        <img id="slide-img" alt="生成图片预览" />
+        <figcaption id="slide-info"></figcaption>
+      </figure>
+      <button class="slide-nav next" id="slide-next" type="button">›</button>
+      <div id="slide-count" class="slide-count"></div>
+    </div>
+
+    <div id="toast-host" class="toast-host"></div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

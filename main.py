@@ -1,6 +1,13 @@
 import asyncio
+import base64
+import json
+import mimetypes
+import re
+import uuid
 from datetime import datetime
-from typing import Dict, Literal, Optional
+from pathlib import Path
+from typing import Any, Dict, Literal, Optional
+from urllib.parse import quote
 
 from astrbot import logger
 from astrbot.api.event import filter
@@ -9,8 +16,11 @@ from astrbot.core import AstrBotConfig
 from astrbot.core.message.components import Image, Plain, Reply, Video
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
+from astrbot.api.web import request as web_request
+from quart import jsonify, request, send_file
 
 from .commands import CommandHandlers
+from .history_cache import ImageHistoryCache
 from .pipeline import ImageGenPipeline
 from .quota import PersistenceManager, UsageGuard
 from .selfie import (
@@ -24,8 +34,11 @@ from .sender import ImageResultSender
 from .workflow import ImageWorkflow
 
 
+PLUGIN_NAME = "astrbot_plugin_free_image"
+
+
 @register(
-    "astrbot_plugin_free_image",
+    PLUGIN_NAME,
     "Singularity2000",
     "文生图、图生图，可自定义提示词模板，兼容多种端点",
     "3.0.0",
@@ -35,28 +48,34 @@ class ImageGenerationPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.conf = config
-        self.persistence = PersistenceManager(config, StarTools.get_data_dir())
+        self.data_dir = StarTools.get_data_dir()
+        self.persistence = PersistenceManager(config, self.data_dir)
+        self.history_cache = ImageHistoryCache(config, self.data_dir)
         self.pipeline: Optional[ImageGenPipeline] = None
         self.iwf: Optional[ImageWorkflow] = None
         self.sender: Optional[ImageResultSender] = None
         self.usage_guard: Optional[UsageGuard] = None
         self.commands = CommandHandlers(self)
         self.prompt_map: Dict[str, str] = {}
+        self._register_page_apis()
 
     async def initialize(self):
         self.iwf = ImageWorkflow(self.conf)
 
-        # --- 构建 Pipeline ---
         self.pipeline = ImageGenPipeline(self.conf, self.iwf)
-        pipeline_config = self.conf.get("api_pipeline", [])
-        self.pipeline.build(pipeline_config)
         self.sender = ImageResultSender(self.conf, self.persistence)
-        self.usage_guard = UsageGuard(self.conf, self.persistence, self.pipeline)
+        self._rebuild_runtime_from_config()
 
         await self.persistence.load_all()
+        await self.history_cache.load_all()
+        await self.history_cache.enforce_limits(reason="startup")
         await self.commands.load_prompt_map()
+        self._refresh_llm_tool_descriptions()
 
-        # 获取自动注册的工具实例并动态更新描述（保留自定义描述功能）
+        logger.info("astrbot_plugin_free_image 插件已加载")
+
+    def _refresh_llm_tool_descriptions(self) -> None:
+        """同步配置到自动注册的 LLM 工具描述。"""
         tool = self.context.get_llm_tool_manager().get_func("image_generation")
         if tool:
             tool.description = self.conf.get(
@@ -76,9 +95,6 @@ class ImageGenerationPlugin(Star):
                     custom_prompt_desc
                 )
 
-        logger.info("astrbot_plugin_free_image 插件已加载")
-
-        # send_selfie 工具动态描述注入
         selfie_tool = self.context.get_llm_tool_manager().get_func("send_selfie")
         if selfie_tool:
             selfie_tool.description = self.conf.get(
@@ -99,6 +115,440 @@ class ImageGenerationPlugin(Star):
                 styles_info = [f"{s['id']}（{s['name']}）" for s in _all_styles(self.conf) if s.get("id") and s.get("name")]
                 style_hint = f"可选。指定风格ID，留空由插件自动选择。当前已配置：{', '.join(styles_info)}" if styles_info else "可选。指定风格ID，留空由插件自动选择"
                 selfie_tool.parameters["properties"]["style_id"]["description"] = style_hint
+
+    def _rebuild_runtime_from_config(self) -> None:
+        if self.pipeline:
+            self.pipeline.build(self.conf.get("api_pipeline", []))
+            self.usage_guard = UsageGuard(self.conf, self.persistence, self.pipeline)
+        self._refresh_llm_tool_descriptions()
+
+    async def save_config_and_refresh_runtime(self) -> None:
+        self.conf.save_config()
+        self._rebuild_runtime_from_config()
+        await self.commands.load_prompt_map()
+
+    def _register_page_apis(self) -> None:
+        routes = [
+            ("get_config_bundle", self.page_get_config_bundle, ["GET"], "获取 FreeImage Pages 配置包"),
+            ("save_page_prefs", self.page_save_page_prefs, ["POST"], "保存 FreeImage Pages 偏好设置"),
+            ("save_pipeline", self.page_save_pipeline, ["POST"], "保存 FreeImage API 管线"),
+            ("save_templates", self.page_save_templates, ["POST"], "保存 FreeImage 提示词模板"),
+            ("save_cache_config", self.page_save_cache_config, ["POST"], "保存 FreeImage 缓存配置"),
+            ("set_cache_enabled", self.page_set_cache_enabled, ["POST"], "切换 FreeImage 缓存开关"),
+            ("get_history", self.page_get_history, ["GET"], "获取 FreeImage 生图历史"),
+            ("get_cache", self.page_get_cache, ["GET"], "获取 FreeImage 缓存列表"),
+            ("clear_cache", self.page_clear_cache, ["POST"], "清理 FreeImage 缓存"),
+            ("save_personas", self.page_save_personas, ["POST"], "保存 FreeImage 自拍人设"),
+            ("save_styles", self.page_save_styles, ["POST"], "保存 FreeImage 自拍风格"),
+            ("upload_persona_image", self.page_upload_persona_image, ["POST"], "上传 FreeImage 自拍参考图"),
+            ("delete_persona_image", self.page_delete_persona_image, ["POST"], "删除 FreeImage 自拍参考图"),
+            ("get_image", self.page_get_image, ["GET"], "获取 FreeImage Pages 图片预览"),
+            ("get_image_data", self.page_get_image_data, ["GET"], "获取 FreeImage Pages 图片 data URL"),
+        ]
+        for endpoint, handler, methods, desc in routes:
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/{endpoint}",
+                handler,
+                methods,
+                desc,
+            )
+
+    def _load_conf_schema(self) -> dict[str, Any]:
+        schema_path = Path(__file__).with_name("_conf_schema.json")
+        try:
+            data = json.loads(schema_path.read_text("utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception as exc:
+            logger.error(f"[FreeImage Pages] 读取配置 schema 失败: {exc}")
+            return {}
+
+    def _schema_entry(self, key: str) -> dict[str, Any]:
+        entry = self._load_conf_schema().get(key, {})
+        return entry if isinstance(entry, dict) else {}
+
+    def _prompt_templates_for_page(self) -> list[dict[str, str]]:
+        templates: list[dict[str, str]] = []
+        for item in self.conf.get("prompt_list", []) or []:
+            text = str(item or "")
+            if ":" not in text:
+                continue
+            trigger, prompt = text.split(":", 1)
+            templates.append({"trigger": trigger.strip(), "prompt": prompt.strip()})
+        return templates
+
+    def _normalize_prompt_templates(self, raw_templates: Any) -> list[str]:
+        if not isinstance(raw_templates, list):
+            return []
+        result: list[str] = []
+        seen: set[str] = set()
+        for item in raw_templates:
+            if not isinstance(item, dict):
+                continue
+            trigger = str(item.get("trigger") or item.get("key") or "").strip()
+            prompt = str(item.get("prompt") or "").strip()
+            if not trigger or not prompt or trigger in seen:
+                continue
+            seen.add(trigger)
+            result.append(f"{trigger}:{prompt}")
+        return result
+
+    def _normalize_pipeline(self, raw_pipeline: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw_pipeline, list):
+            return []
+        templates = self._schema_entry("api_pipeline").get("templates", {})
+        allowed_keys = set(templates.keys()) if isinstance(templates, dict) else set()
+        pipeline: list[dict[str, Any]] = []
+        for node in raw_pipeline:
+            if not isinstance(node, dict):
+                continue
+            template_key = str(node.get("__template_key", "")).strip()
+            if allowed_keys and template_key not in allowed_keys:
+                logger.warning(f"[FreeImage Pages] 跳过未知管线模板: {template_key}")
+                continue
+            clean_node = dict(node)
+            clean_node["__template_key"] = template_key
+            pipeline.append(clean_node)
+        return pipeline
+
+    def _normalize_str_list(self, value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return []
+
+    def _normalize_personas(self, raw_personas: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw_personas, list):
+            return []
+        personas: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in raw_personas:
+            if not isinstance(item, dict):
+                continue
+            pid = str(item.get("id") or "").strip()
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            persona = dict(item)
+            persona["__template_key"] = "selfie_persona"
+            persona["id"] = pid
+            persona["name"] = str(item.get("name") or pid).strip()
+            persona["description"] = str(item.get("description") or "")
+            persona["ref_images"] = self._normalize_str_list(item.get("ref_images"))
+            persona["bound_sids"] = self._normalize_str_list(item.get("bound_sids"))
+            persona["bound_astrbot_personas"] = self._normalize_str_list(
+                item.get("bound_astrbot_personas")
+            )
+            personas.append(persona)
+        return personas
+
+    def _normalize_styles(self, raw_styles: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw_styles, list):
+            return []
+        styles: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in raw_styles:
+            if not isinstance(item, dict):
+                continue
+            sid = str(item.get("id") or "").strip()
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            style = dict(item)
+            style["__template_key"] = "selfie_style"
+            style["id"] = sid
+            style["name"] = str(item.get("name") or sid).strip()
+            style["prompt"] = str(item.get("prompt") or "")
+            style["keywords"] = self._normalize_str_list(item.get("keywords"))
+            style["enabled"] = bool(item.get("enabled", True))
+            styles.append(style)
+        return styles
+
+    def _persona_preview_url(self, path_str: str) -> str:
+        return f"/api/plug/{PLUGIN_NAME}/get_image?persona_path={quote(path_str, safe='')}"
+
+    def _personas_for_page(self) -> list[dict[str, Any]]:
+        personas = []
+        for persona in self.conf.get("selfie_personas", []) or []:
+            if not isinstance(persona, dict):
+                continue
+            page_persona = dict(persona)
+            items = []
+            for path_str in self._normalize_str_list(persona.get("ref_images")):
+                path = Path(path_str)
+                items.append(
+                    {
+                        "path": path_str,
+                        "url": self._persona_preview_url(path_str),
+                        "exists": path.is_file(),
+                    }
+                )
+            page_persona["ref_image_items"] = items
+            personas.append(page_persona)
+        return personas
+
+    def _allowed_persona_image_paths(self) -> set[Path]:
+        allowed: set[Path] = set()
+        for persona in self.conf.get("selfie_personas", []) or []:
+            if not isinstance(persona, dict):
+                continue
+            for path_str in self._normalize_str_list(persona.get("ref_images")):
+                try:
+                    allowed.add(Path(path_str).resolve())
+                except OSError:
+                    continue
+        uploads_dir = self.data_dir / "selfie_personas" / "pages_uploads"
+        if uploads_dir.exists():
+            for path in uploads_dir.rglob("*"):
+                if path.is_file():
+                    try:
+                        allowed.add(path.resolve())
+                    except OSError:
+                        continue
+        return allowed
+
+    def _resolve_page_image_path(self, *, cache_id: str = "", persona_path: str = "") -> Path | None:
+        cache_id = str(cache_id or "").strip()
+        if cache_id:
+            return self.history_cache.get_cache_image_path(cache_id)
+
+        persona_path = str(persona_path or "").strip()
+        if persona_path:
+            try:
+                path = Path(persona_path).resolve()
+            except OSError:
+                return None
+            if path in self._allowed_persona_image_paths() and path.is_file():
+                return path
+        return None
+
+    async def _image_data_url_payload(self, path: Path) -> dict[str, Any]:
+        image_bytes = await asyncio.to_thread(path.read_bytes)
+        mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        return {
+            "success": True,
+            "data_url": f"data:{mime_type};base64,{encoded}",
+            "mime_type": mime_type,
+            "size_bytes": len(image_bytes),
+        }
+
+    def _is_managed_selfie_path(self, path: Path) -> bool:
+        try:
+            resolved = path.resolve()
+            root = (self.data_dir / "selfie_personas").resolve()
+            return root == resolved or root in resolved.parents
+        except OSError:
+            return False
+
+    def _config_bundle_for_page(self) -> dict[str, Any]:
+        page_prefs = self.history_cache.page_prefs.get("__default__", {})
+        if not isinstance(page_prefs, dict):
+            page_prefs = {}
+        return {
+            "pipeline": self.conf.get("api_pipeline", []) or [],
+            "prompt_templates": self._prompt_templates_for_page(),
+            "cache": {
+                "enabled": bool(self.conf.get("enable_image_cache", False)),
+                "max_mb": str(self.conf.get("image_cache_max_size_mb", "") or ""),
+                "max_hours": str(self.conf.get("image_cache_max_age_hours", "") or ""),
+                "max_count": str(self.conf.get("image_cache_max_count", "") or ""),
+            },
+            "selfie": {
+                "binding_mode": self.conf.get("selfie_binding_mode", "优先 AstrBot persona"),
+                "manual_override": self.conf.get("selfie_persona_manual_override", ""),
+                "default_persona_id": self.conf.get("selfie_default_persona_id", ""),
+                "style_mode": self.conf.get("selfie_style_mode", "自动"),
+                "selected_style_id": self.conf.get("selfie_selected_style_id", ""),
+                "personas": self._personas_for_page(),
+                "styles": self.conf.get("selfie_styles", []) or [],
+            },
+            "page_prefs": {
+                "theme": str(page_prefs.get("theme") or "system"),
+                "cache_page_size": int(page_prefs.get("cache_page_size") or 24),
+            },
+        }
+
+    async def page_get_config_bundle(self):
+        username = web_request.username
+        schema = self._load_conf_schema()
+        config_bundle = self._config_bundle_for_page()
+        config_bundle["page_prefs"] = await self.history_cache.get_page_prefs(username)
+        return jsonify(
+            {
+                "success": True,
+                "config": config_bundle,
+                "schema": {
+                    "api_pipeline": schema.get("api_pipeline", {}),
+                    "selfie_personas": schema.get("selfie_personas", {}),
+                    "selfie_styles": schema.get("selfie_styles", {}),
+                },
+            }
+        )
+
+    async def page_save_page_prefs(self):
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"success": False, "message": "请求体必须是 JSON 对象。"}), 400
+        prefs = await self.history_cache.save_page_prefs(payload, web_request.username)
+        return jsonify({"success": True, "prefs": prefs})
+
+    async def page_save_pipeline(self):
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"success": False, "message": "请求体必须是 JSON 对象。"}), 400
+        self.conf["api_pipeline"] = self._normalize_pipeline(payload.get("pipeline"))
+        await self.save_config_and_refresh_runtime()
+        return jsonify({"success": True, "message": "管线已保存。"})
+
+    async def page_save_templates(self):
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"success": False, "message": "请求体必须是 JSON 对象。"}), 400
+        self.conf["prompt_list"] = self._normalize_prompt_templates(payload.get("templates"))
+        await self.save_config_and_refresh_runtime()
+        return jsonify({"success": True, "message": "模板已保存。"})
+
+    async def page_save_cache_config(self):
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"success": False, "message": "请求体必须是 JSON 对象。"}), 400
+        self.conf["enable_image_cache"] = bool(payload.get("enabled", self.conf.get("enable_image_cache", False)))
+        self.conf["image_cache_max_size_mb"] = str(payload.get("max_mb") or "").strip()
+        self.conf["image_cache_max_age_hours"] = str(payload.get("max_hours") or "").strip()
+        self.conf["image_cache_max_count"] = str(payload.get("max_count") or "").strip()
+        await self.save_config_and_refresh_runtime()
+        cleanup = await self.history_cache.enforce_limits(reason="config")
+        return jsonify({"success": True, "message": "缓存配置已保存。", "cleanup": cleanup})
+
+    async def page_set_cache_enabled(self):
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"success": False, "message": "请求体必须是 JSON 对象。"}), 400
+        self.conf["enable_image_cache"] = bool(payload.get("enabled", False))
+        await self.save_config_and_refresh_runtime()
+        return jsonify({"success": True, "enabled": bool(self.conf.get("enable_image_cache", False))})
+
+    async def page_get_history(self):
+        records = await self.history_cache.get_history_for_page()
+        return jsonify({"success": True, "records": records})
+
+    async def page_get_cache(self):
+        cache = await self.history_cache.get_cache_for_page()
+        return jsonify({"success": True, **cache})
+
+    async def page_clear_cache(self):
+        result = await self.history_cache.clear_cache(reason="webui")
+        cache = await self.history_cache.get_cache_for_page()
+        return jsonify({"success": True, "cleanup": result, **cache})
+
+    async def page_save_personas(self):
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"success": False, "message": "请求体必须是 JSON 对象。"}), 400
+        self.conf["selfie_personas"] = self._normalize_personas(payload.get("personas"))
+        if "binding_mode" in payload:
+            self.conf["selfie_binding_mode"] = str(payload.get("binding_mode") or "优先 AstrBot persona")
+        if "manual_override" in payload:
+            self.conf["selfie_persona_manual_override"] = str(payload.get("manual_override") or "")
+        if "default_persona_id" in payload:
+            self.conf["selfie_default_persona_id"] = str(payload.get("default_persona_id") or "")
+        await self.save_config_and_refresh_runtime()
+        return jsonify({"success": True, "message": "自拍人设已保存。"})
+
+    async def page_save_styles(self):
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"success": False, "message": "请求体必须是 JSON 对象。"}), 400
+        self.conf["selfie_styles"] = self._normalize_styles(payload.get("styles"))
+        if "mode" in payload:
+            self.conf["selfie_style_mode"] = str(payload.get("mode") or "自动")
+        if "selected_style_id" in payload:
+            self.conf["selfie_selected_style_id"] = str(payload.get("selected_style_id") or "")
+        await self.save_config_and_refresh_runtime()
+        return jsonify({"success": True, "message": "自拍风格已保存。"})
+
+    async def page_upload_persona_image(self):
+        files = await request.files
+        uploaded = next(iter(files.values()), None) if files else None
+        if not uploaded:
+            return jsonify({"success": False, "message": "没有收到上传文件。"}), 400
+        read_result = uploaded.read()
+        if asyncio.iscoroutine(read_result):
+            image_bytes = await read_result
+        else:
+            image_bytes = read_result
+        if not image_bytes:
+            return jsonify({"success": False, "message": "上传文件为空。"}), 400
+        mime_type, extension = ImageHistoryCache._detect_image_type(image_bytes)
+        if extension == "png" and not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return jsonify({"success": False, "message": "仅支持 PNG、JPEG、WEBP、GIF 图片。"}), 400
+        save_dir = self.data_dir / "selfie_personas" / "pages_uploads"
+        save_dir.mkdir(parents=True, exist_ok=True)
+        path = save_dir / f"{uuid.uuid4().hex}.{extension}"
+        path.write_bytes(image_bytes)
+        path_str = str(path)
+        return jsonify(
+            {
+                "success": True,
+                "path": path_str,
+                "url": self._persona_preview_url(path_str),
+                "mime_type": mime_type,
+            }
+        )
+
+    async def page_delete_persona_image(self):
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"success": False, "message": "请求体必须是 JSON 对象。"}), 400
+        persona_id = str(payload.get("persona_id") or "").strip()
+        path_str = str(payload.get("path") or "").strip()
+        if not persona_id or not path_str:
+            return jsonify({"success": False, "message": "缺少人设 ID 或图片路径。"}), 400
+
+        personas = list(self.conf.get("selfie_personas", []) or [])
+        removed = False
+        for persona in personas:
+            if not isinstance(persona, dict) or str(persona.get("id")) != persona_id:
+                continue
+            refs = self._normalize_str_list(persona.get("ref_images"))
+            if path_str in refs:
+                refs.remove(path_str)
+                persona["ref_images"] = refs
+                removed = True
+            break
+
+        if removed:
+            path = Path(path_str)
+            if self._is_managed_selfie_path(path) and path.is_file():
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    logger.warning(f"[FreeImage Pages] 删除自拍参考图文件失败: {path} - {exc}")
+            self.conf["selfie_personas"] = personas
+            await self.save_config_and_refresh_runtime()
+        return jsonify({"success": True, "removed": removed})
+
+    async def page_get_image(self):
+        cache_id = str(request.args.get("cache_id", "")).strip()
+        persona_path = str(request.args.get("persona_path", "")).strip()
+        if not cache_id and not persona_path:
+            return jsonify({"success": False, "message": "缺少图片参数。"}), 400
+        path = self._resolve_page_image_path(cache_id=cache_id, persona_path=persona_path)
+        if not path:
+            return jsonify({"success": False, "message": "图片不存在或未被配置。"}), 404
+        mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
+        return await send_file(path, mimetype=mime_type)
+
+    async def page_get_image_data(self):
+        cache_id = str(request.args.get("cache_id", "")).strip()
+        persona_path = str(request.args.get("persona_path", "")).strip()
+        if not cache_id and not persona_path:
+            return jsonify({"success": False, "message": "缺少图片参数。"}), 400
+        path = self._resolve_page_image_path(cache_id=cache_id, persona_path=persona_path)
+        if not path:
+            return jsonify({"success": False, "message": "图片不存在或未被配置。"}), 404
+        return jsonify(await self._image_data_url_payload(path))
 
     def _strip_wake_prefix(self, text: str) -> str:
         wake_prefixes = self.context.get_config().get("wake_prefix", [])
@@ -157,7 +607,12 @@ class ImageGenerationPlugin(Star):
         async def _run_background_gen():
             try:
                 async for result in self.handle_image_gen_logic(
-                    event, prompt, is_i2i=is_i2i, request_source="llm_tool", count=count
+                    event,
+                    prompt,
+                    is_i2i=is_i2i,
+                    request_source="llm_tool",
+                    count=count,
+                    generation_mode="image2img" if is_i2i else "text2img",
                 ):
                     await self._send_with_auto_quote(event, result, request_source="llm_tool")
             except Exception as e:
@@ -275,6 +730,7 @@ class ImageGenerationPlugin(Star):
         request_source: Literal["command", "llm_tool"] = "command",
         count: int = 1,
         model_index: Optional[int] = None,
+        generation_mode: str | None = None,
     ):
         if not self.pipeline or not self.sender or not self.usage_guard:
             yield self._quoted_plain_result(event, "❌ 插件尚未完成初始化，请稍后再试。")
@@ -315,6 +771,7 @@ class ImageGenerationPlugin(Star):
 
         concise_mode = self.conf.get("concise_mode", False) and bool(group_id)
         start_msg = f"🎨 收到{'图生图' if is_i2i else '文生图'}请求，正在生成 [{display_name}]..."
+        generation_mode = generation_mode or ("image2img" if is_i2i else "text2img")
 
         if concise_mode:
             logger.info(start_msg)
@@ -359,13 +816,14 @@ class ImageGenerationPlugin(Star):
             async for res in self._batch_generate_concurrent(
                 event, prompt, images_to_process, count, available,
                 is_i2i, display_name, concise_mode, request_source, model_index,
+                generation_mode,
             ):
                 yield res
         else:
             async for res in self._batch_generate_sequential(
                 event, prompt, images_to_process, count, available,
                 is_master, is_i2i, display_name, concise_mode,
-                request_source, sender_id, group_id, model_index,
+                request_source, sender_id, group_id, model_index, generation_mode,
             ):
                 yield res
 
@@ -384,6 +842,7 @@ class ImageGenerationPlugin(Star):
         sender_id: str,
         group_id: str,
         model_index: Optional[int],
+        generation_mode: str,
     ):
         """非管理员串行生图，无间隔。管理员单张也走这里。"""
         for i in range(count):
@@ -400,9 +859,9 @@ class ImageGenerationPlugin(Star):
             elapsed = (datetime.now() - start_time).total_seconds()
 
             async for msg in self._process_single_result(
-                event, res, model_name, elapsed, suffix, i, count,
+                event, prompt, res, model_name, elapsed, suffix, i, count,
                 is_master, is_i2i, display_name, concise_mode,
-                request_source, sender_id, group_id, model_index,
+                request_source, sender_id, group_id, model_index, generation_mode,
             ):
                 yield msg
 
@@ -418,6 +877,7 @@ class ImageGenerationPlugin(Star):
         concise_mode: bool,
         request_source: Literal["command", "llm_tool"],
         model_index: Optional[int],
+        generation_mode: str,
     ):
         """管理员并发生图，彼此间隔2秒防抖启动。不扣费，无竞态。"""
         sender_id = event.get_sender_id()
@@ -452,10 +912,10 @@ class ImageGenerationPlugin(Star):
 
             res, model_name, elapsed = payload
             async for msg in self._process_single_result(
-                event, res, model_name, elapsed, suffix, idx, count,
+                event, prompt, res, model_name, elapsed, suffix, idx, count,
                 True,  # is_master=True（并发仅管理员）
                 is_i2i, display_name, concise_mode,
-                request_source, sender_id, group_id, model_index,
+                request_source, sender_id, group_id, model_index, generation_mode,
             ):
                 yield msg
 
@@ -469,9 +929,45 @@ class ImageGenerationPlugin(Star):
             return "❌ 本群的使用次数已用完，请等待次日重置或向管理员索要。"
         return "❌ 次数已用完。"
 
+    async def _record_generation_success(
+        self,
+        *,
+        event: AstrMessageEvent,
+        prompt: str,
+        images: list[bytes],
+        elapsed: float,
+        model_name: str | None,
+        display_name: str,
+        mode: str,
+        request_source: Literal["command", "llm_tool"],
+        model_index: Optional[int],
+        media_type: str = "image",
+        media_url: str = "",
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            await self.history_cache.record_generation(
+                user_id=event.get_sender_id(),
+                group_id=event.get_group_id() or "",
+                mode=mode,
+                request_source=request_source,
+                prompt=prompt,
+                elapsed=elapsed,
+                model=model_name,
+                display_name=display_name,
+                model_index=model_index,
+                images=images,
+                media_type=media_type,
+                media_url=media_url,
+                extra=extra,
+            )
+        except Exception as exc:
+            logger.error(f"[FreeImage History] 记录生图历史失败: {exc}", exc_info=True)
+
     async def _process_single_result(
         self,
         event: AstrMessageEvent,
+        prompt: str,
         res,
         model_name: Optional[str],
         elapsed: float,
@@ -486,6 +982,7 @@ class ImageGenerationPlugin(Star):
         sender_id: str,
         group_id: str,
         model_index: Optional[int],
+        generation_mode: str,
     ):
         """处理单次 pipeline.execute 的结果，yield 出消息。扣费在非管理员时执行。"""
         image_results = self.sender.normalize_image_results(res)
@@ -503,6 +1000,17 @@ class ImageGenerationPlugin(Star):
                 model_name=model_name,
             )
             caption_text = f"{caption_text}{suffix}"
+            await self._record_generation_success(
+                event=event,
+                prompt=prompt,
+                images=image_results,
+                elapsed=elapsed,
+                model_name=model_name,
+                display_name=display_name,
+                mode=generation_mode,
+                request_source=request_source,
+                model_index=model_index,
+            )
             logger.info(caption_text)
             async for msg in self.sender.yield_success_images(
                 event=event,
@@ -537,6 +1045,19 @@ class ImageGenerationPlugin(Star):
 
             caption_text = " | ".join(caption_parts) + suffix
             video_component = Video.fromURL(url=res["url"])
+            await self._record_generation_success(
+                event=event,
+                prompt=prompt,
+                images=[],
+                elapsed=elapsed,
+                model_name=model_name,
+                display_name=display_name,
+                mode=generation_mode,
+                request_source=request_source,
+                model_index=model_index,
+                media_type="video",
+                media_url=str(res.get("url", "")),
+            )
             logger.info(caption_text)
             if concise_mode:
                 yield event.chain_result(
@@ -565,6 +1086,11 @@ class ImageGenerationPlugin(Star):
     async def on_model_pipeline_command(self, event: AstrMessageEvent):
         async for result in self.commands.on_model_pipeline_command(event):
             yield result
+
+    @filter.command("画图缓存", prefix_optional=True)
+    async def on_image_cache_command(self, event: AstrMessageEvent):
+        async for res in self.commands.on_image_cache_command(event):
+            yield res
 
     @filter.command("画图简洁模式", prefix_optional=True)
     async def on_concise_mode_command(self, event: AstrMessageEvent):
@@ -709,6 +1235,18 @@ class ImageGenerationPlugin(Star):
                         remaining_str,
                         f"模型: {model_name}" if model_name else "",
                     ] if part) + suffix
+                    await self._record_generation_success(
+                        event=event,
+                        prompt=prompt,
+                        images=image_results,
+                        elapsed=elapsed,
+                        model_name=model_name,
+                        display_name=persona_name,
+                        mode="selfie",
+                        request_source=request_source,
+                        model_index=model_index,
+                        extra={"persona_name": persona_name, "style_name": style_name},
+                    )
                     logger.info(caption_text)
                     async for msg in self.sender.yield_success_images(
                         event=event, images=image_results, caption_text=caption_text,
@@ -770,6 +1308,18 @@ class ImageGenerationPlugin(Star):
                         remaining_str,
                         f"模型: {model_name}" if model_name else "",
                     ] if part) + suffix
+                    await self._record_generation_success(
+                        event=event,
+                        prompt=prompt,
+                        images=image_results,
+                        elapsed=elapsed,
+                        model_name=model_name,
+                        display_name=persona_name,
+                        mode="selfie",
+                        request_source=request_source,
+                        model_index=model_index,
+                        extra={"persona_name": persona_name, "style_name": style_name},
+                    )
                     logger.info(caption_text)
                     async for msg in self.sender.yield_success_images(
                         event=event, images=image_results, caption_text=caption_text,

@@ -88,15 +88,10 @@ class CommandHandlers:
             return "", None
         return action, int(index_text)
 
-    def save_and_rebuild_pipeline(self) -> None:
+    async def save_and_rebuild_pipeline(self) -> None:
         p = self.plugin
         p.conf["api_pipeline"] = self.get_api_pipeline_config()
-        p.conf.save_config()
-        if p.pipeline:
-            p.pipeline.build(p.conf.get("api_pipeline", []))
-            from .quota import UsageGuard
-
-            p.usage_guard = UsageGuard(p.conf, p.persistence, p.pipeline)
+        await p.save_config_and_refresh_runtime()
 
     async def handle_model_pipeline_command(self, event: AstrMessageEvent, raw_args: str):
         p = self.plugin
@@ -139,7 +134,7 @@ class CommandHandlers:
             event.stop_event()
             return
 
-        self.save_and_rebuild_pipeline()
+        await self.save_and_rebuild_pipeline()
         yield event.plain_result(self.format_model_pipeline_message("操作成功。", is_admin=True))
         event.stop_event()
 
@@ -218,6 +213,7 @@ class CommandHandlers:
                 async for res in p.handle_image_gen_logic(
                     event, remaining, is_i2i=False,
                     request_source="command", model_index=model_index,
+                    generation_mode="text2img",
                 ):
                     yield res
                 event.stop_event()
@@ -233,6 +229,7 @@ class CommandHandlers:
                 async for res in p.handle_image_gen_logic(
                     event, remaining, is_i2i=True,
                     request_source="command", model_index=model_index,
+                    generation_mode="image2img",
                 ):
                     yield res
                 event.stop_event()
@@ -256,7 +253,7 @@ class CommandHandlers:
                 async for res in p.handle_image_gen_logic(
                     event, user_prompt, is_i2i=True,
                     display_name=display_name, request_source="command",
-                    model_index=model_index,
+                    model_index=model_index, generation_mode="template",
                 ):
                     yield res
                 event.stop_event()
@@ -284,6 +281,7 @@ class CommandHandlers:
             is_i2i=True,
             display_name=display_cmd,
             request_source="command",
+            generation_mode="template",
         ):
             yield res
         event.stop_event()
@@ -297,7 +295,7 @@ class CommandHandlers:
             yield p._quoted_plain_result(event, "请提供文生图的描述。用法: #文生图 <描述>")
             return
         async for res in p.handle_image_gen_logic(
-            event, prompt, is_i2i=False, request_source="command"
+            event, prompt, is_i2i=False, request_source="command", generation_mode="text2img"
         ):
             yield res
         event.stop_event()
@@ -313,7 +311,7 @@ class CommandHandlers:
             )
             return
         async for res in p.handle_image_gen_logic(
-            event, prompt, is_i2i=True, request_source="command"
+            event, prompt, is_i2i=True, request_source="command", generation_mode="image2img"
         ):
             yield res
         event.stop_event()
@@ -357,6 +355,72 @@ class CommandHandlers:
             raw = raw.removeprefix("画图模型").strip()
         async for result in self.handle_model_pipeline_command(event, raw):
             yield result
+
+    def image_cache_help(self) -> str:
+        return (
+            "画图缓存命令：\n"
+            "#画图缓存 状态\n"
+            "#画图缓存 开启\n"
+            "#画图缓存 关闭\n"
+            "#画图缓存 清理"
+        )
+
+    async def on_image_cache_command(self, event: AstrMessageEvent):
+        p = self.plugin
+        if not p.is_global_admin(event):
+            yield event.plain_result(self.admin_denied_message())
+            event.stop_event()
+            return
+
+        raw = event.message_str.strip()
+        if raw.startswith("画图缓存"):
+            raw = raw.removeprefix("画图缓存").strip()
+
+        if not raw:
+            yield event.plain_result(self.image_cache_help())
+            event.stop_event()
+            return
+
+        if raw == "开启":
+            p.conf["enable_image_cache"] = True
+            await p.save_config_and_refresh_runtime()
+            yield event.plain_result("✅ 画图缓存已开启。")
+            event.stop_event()
+            return
+
+        if raw == "关闭":
+            p.conf["enable_image_cache"] = False
+            await p.save_config_and_refresh_runtime()
+            yield event.plain_result("✅ 画图缓存已关闭。")
+            event.stop_event()
+            return
+
+        if raw == "清理":
+            result = await p.history_cache.clear_cache(reason="command")
+            yield event.plain_result(
+                f"✅ 已清理画图缓存：删除 {result['deleted_count']} 张，释放 {result['deleted_bytes']} bytes。"
+            )
+            event.stop_event()
+            return
+
+        if raw == "状态":
+            stats = await p.history_cache.get_cache_for_page()
+            enabled_text = "开启" if stats.get("enabled") else "关闭"
+            limit_parts = []
+            limit_parts.append(f"最大大小: {stats.get('max_mb') or '不限制'} MB")
+            limit_parts.append(f"最长保存: {stats.get('max_hours') or '不限制'} 小时")
+            limit_parts.append(f"最多张数: {stats.get('max_count') or '不限制'} 张")
+            yield event.plain_result(
+                "画图缓存状态：\n"
+                f"状态: {enabled_text}\n"
+                f"当前缓存: {stats.get('total_count', 0)} 张，{stats.get('total_bytes', 0)} bytes\n"
+                + "\n".join(limit_parts)
+            )
+            event.stop_event()
+            return
+
+        yield event.plain_result(self.image_cache_help())
+        event.stop_event()
 
     async def on_concise_mode_command(self, event: AstrMessageEvent):
         p = self.plugin
