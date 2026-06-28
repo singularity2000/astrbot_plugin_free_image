@@ -143,6 +143,25 @@ class ImageHistoryCache:
             )
             return result
 
+    async def delete_cache_image(self, cache_id: str, *, reason: str = "webui") -> dict[str, Any]:
+        async with self._lock:
+            target_id = str(cache_id or "").strip()
+            if not target_id:
+                return {
+                    "reason": reason,
+                    "deleted_count": 0,
+                    "deleted_bytes": 0,
+                    "remaining_count": len(self.cache_images),
+                    "remaining_bytes": sum(int(item.get("size_bytes") or 0) for item in self.cache_images),
+                }
+            result = self._delete_cache_ids_locked({target_id}, reason=reason)
+            if result["deleted_count"]:
+                logger.info(
+                    "[FreeImage Cache] 已删除单张缓存："
+                    f"{target_id}，释放 {result['deleted_bytes']} bytes。"
+                )
+            return result
+
     async def enforce_limits(self, *, reason: str = "startup") -> dict[str, Any]:
         async with self._lock:
             result = self._cleanup_cache_locked(reason=reason)
@@ -212,6 +231,17 @@ class ImageHistoryCache:
                     page_size = 0
                 if page_size in {12, 24, 48, 96}:
                     prefs["cache_page_size"] = page_size
+            if "history_page_size" in updates:
+                try:
+                    page_size = int(updates.get("history_page_size"))
+                except (TypeError, ValueError):
+                    page_size = 0
+                if page_size in {10, 20, 50, 100}:
+                    prefs["history_page_size"] = page_size
+            if "last_tab" in updates:
+                last_tab = str(updates.get("last_tab") or "").strip()
+                if last_tab in {"pipeline", "templates", "selfie", "history"}:
+                    prefs["last_tab"] = last_tab
             self._set_prefs_for_user(username, prefs)
             self._save_page_prefs()
             return dict(prefs)
@@ -267,18 +297,10 @@ class ImageHistoryCache:
                     to_delete.add(item_id)
                     total_bytes -= int(item.get("size_bytes") or 0)
 
-        kept: list[dict[str, Any]] = []
-        for item in self.cache_images:
-            item_id = str(item.get("id") or "")
-            if item_id in to_delete:
-                deleted_count += 1
-                deleted_bytes += int(item.get("size_bytes") or 0)
-                self._safe_unlink(self._entry_path(item))
-            else:
-                kept.append(item)
-
-        self.cache_images = kept
-        if clear_all or deleted_count or self.cache_index_file.exists() or self.cache_images:
+        result = self._delete_cache_ids_locked(to_delete, reason=reason, save_when_empty=clear_all)
+        deleted_count = int(result["deleted_count"])
+        deleted_bytes = int(result["deleted_bytes"])
+        if not deleted_count and (clear_all or self.cache_index_file.exists() or self.cache_images):
             self._save_cache_index()
         return {
             "reason": reason,
@@ -287,6 +309,72 @@ class ImageHistoryCache:
             "remaining_count": len(self.cache_images),
             "remaining_bytes": sum(int(item.get("size_bytes") or 0) for item in self.cache_images),
         }
+
+    def _delete_cache_ids_locked(
+        self,
+        cache_ids: set[str],
+        *,
+        reason: str,
+        save_when_empty: bool = False,
+    ) -> dict[str, Any]:
+        target_ids = {str(item_id) for item_id in cache_ids if item_id}
+        deleted_count = 0
+        deleted_bytes = 0
+        if not target_ids:
+            return {
+                "reason": reason,
+                "deleted_count": 0,
+                "deleted_bytes": 0,
+                "remaining_count": len(self.cache_images),
+                "remaining_bytes": sum(int(item.get("size_bytes") or 0) for item in self.cache_images),
+            }
+
+        kept: list[dict[str, Any]] = []
+        deleted_ids: set[str] = set()
+        for item in self.cache_images:
+            item_id = str(item.get("id") or "")
+            if item_id in target_ids:
+                deleted_ids.add(item_id)
+                deleted_count += 1
+                deleted_bytes += int(item.get("size_bytes") or 0)
+                self._safe_unlink(self._entry_path(item))
+            else:
+                kept.append(item)
+
+        if not deleted_ids:
+            return {
+                "reason": reason,
+                "deleted_count": 0,
+                "deleted_bytes": 0,
+                "remaining_count": len(self.cache_images),
+                "remaining_bytes": sum(int(item.get("size_bytes") or 0) for item in self.cache_images),
+            }
+
+        self.cache_images = kept
+        history_changed = self._remove_cache_ids_from_history(deleted_ids)
+        if save_when_empty or deleted_count or self.cache_index_file.exists() or self.cache_images:
+            self._save_cache_index()
+        if history_changed:
+            self._save_history()
+        return {
+            "reason": reason,
+            "deleted_count": deleted_count,
+            "deleted_bytes": deleted_bytes,
+            "remaining_count": len(self.cache_images),
+            "remaining_bytes": sum(int(item.get("size_bytes") or 0) for item in self.cache_images),
+        }
+
+    def _remove_cache_ids_from_history(self, deleted_ids: set[str]) -> bool:
+        changed = False
+        for record in self.records:
+            cache_ids = record.get("cache_ids")
+            if not isinstance(cache_ids, list):
+                continue
+            next_ids = [item for item in cache_ids if str(item) not in deleted_ids]
+            if len(next_ids) != len(cache_ids):
+                record["cache_ids"] = next_ids
+                changed = True
+        return changed
 
     def _write_cache_image(
         self,
@@ -438,6 +526,15 @@ class ImageHistoryCache:
         except (TypeError, ValueError):
             page_size = 24
         prefs["cache_page_size"] = page_size if page_size in {12, 24, 48, 96} else 24
+        try:
+            history_page_size = int(prefs.get("history_page_size", 20))
+        except (TypeError, ValueError):
+            history_page_size = 20
+        prefs["history_page_size"] = (
+            history_page_size if history_page_size in {10, 20, 50, 100} else 20
+        )
+        last_tab = str(prefs.get("last_tab") or "").strip()
+        prefs["last_tab"] = last_tab if last_tab in {"pipeline", "templates", "selfie", "history"} else "pipeline"
         return prefs
 
     def _set_prefs_for_user(self, username: str | None, prefs: dict[str, Any]) -> None:

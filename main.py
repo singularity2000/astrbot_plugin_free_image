@@ -41,7 +41,7 @@ PLUGIN_NAME = "astrbot_plugin_free_image"
     PLUGIN_NAME,
     "Singularity2000",
     "文生图、图生图，可自定义提示词模板，兼容多种端点",
-    "3.0.0",
+    "3.5.1",
     "https://github.com/singularity2000/astrbot_plugin_free_image",
 )
 class ImageGenerationPlugin(Star):
@@ -138,6 +138,7 @@ class ImageGenerationPlugin(Star):
             ("get_history", self.page_get_history, ["GET"], "获取 FreeImage 生图历史"),
             ("get_cache", self.page_get_cache, ["GET"], "获取 FreeImage 缓存列表"),
             ("clear_cache", self.page_clear_cache, ["POST"], "清理 FreeImage 缓存"),
+            ("delete_cache_image", self.page_delete_cache_image, ["POST"], "删除 FreeImage 单张缓存图片"),
             ("save_personas", self.page_save_personas, ["POST"], "保存 FreeImage 自拍人设"),
             ("save_styles", self.page_save_styles, ["POST"], "保存 FreeImage 自拍风格"),
             ("upload_persona_image", self.page_upload_persona_image, ["POST"], "上传 FreeImage 自拍参考图"),
@@ -341,6 +342,13 @@ class ImageGenerationPlugin(Star):
         except OSError:
             return False
 
+    @staticmethod
+    def _page_pref_int(page_prefs: dict[str, Any], key: str, default: int) -> int:
+        try:
+            return int(page_prefs.get(key) or default)
+        except (TypeError, ValueError):
+            return default
+
     def _config_bundle_for_page(self) -> dict[str, Any]:
         page_prefs = self.history_cache.page_prefs.get("__default__", {})
         if not isinstance(page_prefs, dict):
@@ -365,7 +373,9 @@ class ImageGenerationPlugin(Star):
             },
             "page_prefs": {
                 "theme": str(page_prefs.get("theme") or "system"),
-                "cache_page_size": int(page_prefs.get("cache_page_size") or 24),
+                "cache_page_size": self._page_pref_int(page_prefs, "cache_page_size", 24),
+                "history_page_size": self._page_pref_int(page_prefs, "history_page_size", 20),
+                "last_tab": str(page_prefs.get("last_tab") or "pipeline"),
             },
         }
 
@@ -439,6 +449,17 @@ class ImageGenerationPlugin(Star):
 
     async def page_clear_cache(self):
         result = await self.history_cache.clear_cache(reason="webui")
+        cache = await self.history_cache.get_cache_for_page()
+        return jsonify({"success": True, "cleanup": result, **cache})
+
+    async def page_delete_cache_image(self):
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"success": False, "message": "请求体必须是 JSON 对象。"}), 400
+        cache_id = str(payload.get("cache_id") or "").strip()
+        if not cache_id:
+            return jsonify({"success": False, "message": "缺少缓存图片 ID。"}), 400
+        result = await self.history_cache.delete_cache_image(cache_id, reason="webui")
         cache = await self.history_cache.get_cache_for_page()
         return jsonify({"success": True, "cleanup": result, **cache})
 

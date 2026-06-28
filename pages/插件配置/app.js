@@ -6,13 +6,28 @@ const bridge = window.AstrBotPluginPage || {
 };
 
 const CACHE_PAGE_SIZE_KEY = "freeimage.cache.pageSize";
+const HISTORY_PAGE_SIZE_KEY = "freeimage.history.pageSize";
+const LAST_TAB_KEY = "freeimage.lastTab";
 const PAGE_API_TIMEOUT_MS = 12000;
 const THEME_KEY = "freeimage.theme";
 const THEME_VALUES = new Set(["system", "light", "dark"]);
+const TAB_VALUES = new Set(["pipeline", "templates", "selfie", "history"]);
 const DEFAULT_THEME = "system";
 const DEFAULT_CACHE_PAGE_SIZE = 24;
+const DEFAULT_HISTORY_PAGE_SIZE = 20;
 
 let memoryStorageFallback = {};
+let sortIdentityCounter = 0;
+const sortIdentities = new WeakMap();
+
+function sortIdForObject(prefix, item) {
+  if (!item || typeof item !== "object") return `${prefix}-primitive-${sortIdentityCounter += 1}`;
+  if (!sortIdentities.has(item)) {
+    sortIdentityCounter += 1;
+    sortIdentities.set(item, `${prefix}-${sortIdentityCounter}`);
+  }
+  return sortIdentities.get(item);
+}
 
 function safeStorageGet(key, fallback = "") {
   try {
@@ -47,6 +62,8 @@ const state = {
   promptTemplates: [],
   history: [],
   filteredHistory: [],
+  historyPage: 1,
+  historyPageSize: DEFAULT_HISTORY_PAGE_SIZE,
   cache: {
     enabled: false,
     max_mb: "",
@@ -61,6 +78,8 @@ const state = {
   pagePrefs: {
     theme: DEFAULT_THEME,
     cache_page_size: DEFAULT_CACHE_PAGE_SIZE,
+    history_page_size: DEFAULT_HISTORY_PAGE_SIZE,
+    last_tab: "pipeline",
   },
   selfie: {
     binding_mode: "优先 AstrBot persona",
@@ -72,6 +91,8 @@ const state = {
     styles: [],
   },
   activePersonaIndex: 0,
+  activeStyleIndex: 0,
+  activeTab: "pipeline",
   slideItems: [],
   slideIndex: 0,
   expandedPipeline: new Set(),
@@ -107,6 +128,16 @@ function normalizeCachePageSize(value) {
   return [12, 24, 48, 96].includes(parsed) ? parsed : DEFAULT_CACHE_PAGE_SIZE;
 }
 
+function normalizeHistoryPageSize(value) {
+  const parsed = Number(value);
+  return [10, 20, 50, 100].includes(parsed) ? parsed : DEFAULT_HISTORY_PAGE_SIZE;
+}
+
+function normalizeTab(value) {
+  const tab = String(value || "").trim();
+  return TAB_VALUES.has(tab) ? tab : "pipeline";
+}
+
 async function persistPagePrefs(updates, successMessage = "") {
   const result = await callApi("保存页面偏好", () => bridge.apiPost("save_page_prefs", updates));
   if (result?.success === false) return false;
@@ -114,12 +145,22 @@ async function persistPagePrefs(updates, successMessage = "") {
   state.pagePrefs = {
     ...state.pagePrefs,
     ...prefs,
-    theme: THEME_VALUES.has(String(prefs.theme || "").trim().toLowerCase())
+    theme: Object.prototype.hasOwnProperty.call(prefs, "theme")
+      && THEME_VALUES.has(String(prefs.theme || "").trim().toLowerCase())
       ? String(prefs.theme).trim().toLowerCase()
       : state.pagePrefs.theme,
-    cache_page_size: normalizeCachePageSize(prefs.cache_page_size),
+    cache_page_size: Object.prototype.hasOwnProperty.call(prefs, "cache_page_size")
+      ? normalizeCachePageSize(prefs.cache_page_size)
+      : state.pagePrefs.cache_page_size,
+    history_page_size: Object.prototype.hasOwnProperty.call(prefs, "history_page_size")
+      ? normalizeHistoryPageSize(prefs.history_page_size)
+      : state.pagePrefs.history_page_size,
+    last_tab: Object.prototype.hasOwnProperty.call(prefs, "last_tab")
+      ? normalizeTab(prefs.last_tab)
+      : state.pagePrefs.last_tab,
   };
   state.cachePageSize = state.pagePrefs.cache_page_size;
+  state.historyPageSize = state.pagePrefs.history_page_size;
   if (successMessage) showToast(successMessage);
   return true;
 }
@@ -484,16 +525,68 @@ function updateBoundValue(input) {
   }
 
   if (section === "pipeline" && state.pipeline[index]) state.pipeline[index][key] = value;
-  if (section === "style" && state.selfie.styles[index]) state.selfie.styles[index][key] = value;
+  if (section === "style" && state.selfie.styles[index]) {
+    state.selfie.styles[index][key] = value;
+    if (["id", "name", "keywords", "enabled"].includes(key)) renderStyleList();
+  }
 }
 
-function moveItem(list, from, to) {
+function moveItem(list, from, to, expandedSet = null) {
   if (from === to || from < 0 || to < 0 || from >= list.length || to >= list.length) return;
   const [item] = list.splice(from, 1);
   list.splice(to, 0, item);
+  if (!expandedSet) return;
+  const next = new Set();
+  expandedSet.forEach((index) => {
+    let mapped = index;
+    if (index === from) mapped = to;
+    else if (from < to && index > from && index <= to) mapped = index - 1;
+    else if (to < from && index >= to && index < from) mapped = index + 1;
+    next.add(mapped);
+  });
+  expandedSet.clear();
+  next.forEach((index) => expandedSet.add(index));
 }
 
 let dragState = null;
+
+function sortablePositions(container) {
+  const positions = new Map();
+  container?.querySelectorAll("[data-sort-id]").forEach((item) => {
+    positions.set(item.dataset.sortId, item.getBoundingClientRect());
+  });
+  return positions;
+}
+
+function playReorderAnimation(container, before) {
+  if (!container || !before?.size) return;
+  container.querySelectorAll("[data-sort-id]").forEach((item) => {
+    const first = before.get(item.dataset.sortId);
+    if (!first) return;
+    const last = item.getBoundingClientRect();
+    const deltaY = first.top - last.top;
+    if (!deltaY) return;
+    item.style.transform = `translateY(${deltaY}px)`;
+    item.style.transition = "transform 0s";
+    requestAnimationFrame(() => {
+      item.style.transform = "";
+      item.style.transition = "";
+    });
+  });
+}
+
+function reorderWithAnimation(container, mutate, render) {
+  const before = sortablePositions(container);
+  mutate();
+  render();
+  requestAnimationFrame(() => playReorderAnimation(container, before));
+}
+
+function clearDropMarkers(container) {
+  container?.querySelectorAll(".drop-before, .drop-after").forEach((item) => {
+    item.classList.remove("drop-before", "drop-after");
+  });
+}
 
 function bindSortable(container, type) {
   if (!container) return;
@@ -505,23 +598,34 @@ function bindSortable(container, type) {
     });
     item.addEventListener("dragend", () => {
       item.classList.remove("dragging");
+      clearDropMarkers(container);
       dragState = null;
     });
     item.addEventListener("dragover", (event) => {
       if (!dragState || dragState.type !== type) return;
       event.preventDefault();
+      clearDropMarkers(container);
+      const targetIndex = Number(item.dataset.index);
+      if (targetIndex === dragState.index) return;
+      item.classList.add(targetIndex > dragState.index ? "drop-after" : "drop-before");
+    });
+    item.addEventListener("dragleave", () => {
+      item.classList.remove("drop-before", "drop-after");
     });
     item.addEventListener("drop", (event) => {
       event.preventDefault();
       if (!dragState || dragState.type !== type) return;
       const to = Number(item.dataset.index);
+      clearDropMarkers(container);
       if (type === "pipeline") {
-        moveItem(state.pipeline, dragState.index, to);
-        renderPipeline();
+        reorderWithAnimation(container, () => {
+          moveItem(state.pipeline, dragState.index, to, state.expandedPipeline);
+        }, renderPipeline);
       }
       if (type === "template") {
-        moveItem(state.promptTemplates, dragState.index, to);
-        renderPromptTemplates();
+        reorderWithAnimation(container, () => {
+          moveItem(state.promptTemplates, dragState.index, to, state.expandedTemplates);
+        }, renderPromptTemplates);
       }
     });
   });
@@ -554,7 +658,7 @@ function renderPipeline() {
       .map(([fieldKey, field]) => fieldHtml("pipeline", index, fieldKey, field, node[fieldKey] ?? defaultValueForField(field)))
       .join("");
     return `
-      <article class="node-card ${expanded ? "expanded" : ""}" data-index="${index}" draggable="true">
+      <article class="node-card ${expanded ? "expanded" : ""}" data-index="${index}" data-sort-id="${sortIdForObject("pipeline", node)}" draggable="true">
         <div class="node-head">
           <div class="node-title">
             <span class="node-index">${index + 1}</span>
@@ -624,7 +728,7 @@ function renderPromptTemplates() {
   list.innerHTML = state.promptTemplates.map((item, index) => {
     const expanded = state.expandedTemplates.has(index);
     return `
-      <article class="template-card ${expanded ? "expanded" : ""}" data-index="${index}" draggable="true">
+      <article class="template-card ${expanded ? "expanded" : ""}" data-index="${index}" data-sort-id="${sortIdForObject("template", item)}" draggable="true">
         <div class="template-head">
           <div class="template-title">
             <span class="node-index">${index + 1}</span>
@@ -710,6 +814,7 @@ function applyHistoryFilters() {
     if (model && record.model !== model) return false;
     return true;
   });
+  state.historyPage = 1;
   renderHistory();
 }
 
@@ -777,10 +882,10 @@ function renderMetrics(records) {
   const todayCount = records.filter((item) => getRecordDate(item).slice(0, 10) === today).length;
   const avg = total ? records.reduce((sum, item) => sum + (Number(item.elapsed) || 0), 0) / total : 0;
   const users = new Set(records.map((item) => item.user_id).filter(Boolean)).size;
-  byId("metric-total").textContent = total;
-  byId("metric-today").textContent = todayCount;
-  byId("metric-avg").textContent = `${avg.toFixed(1)}s`;
-  byId("metric-users").textContent = users;
+  if (byId("metric-total")) byId("metric-total").textContent = total;
+  if (byId("metric-today")) byId("metric-today").textContent = todayCount;
+  if (byId("metric-avg")) byId("metric-avg").textContent = `${avg.toFixed(1)}s`;
+  if (byId("metric-users")) byId("metric-users").textContent = users;
 }
 
 function renderHistory() {
@@ -790,11 +895,21 @@ function renderHistory() {
   renderBars("model-bars", groupCounts(records, "model"));
   const tbody = byId("history-body");
   if (!tbody) return;
+  const sizeSelect = byId("history-page-size");
+  if (sizeSelect) sizeSelect.value = String(normalizeHistoryPageSize(state.historyPageSize));
+  const totalPages = Math.max(1, Math.ceil(records.length / state.historyPageSize));
+  state.historyPage = Math.min(Math.max(1, state.historyPage), totalPages);
+  const start = (state.historyPage - 1) * state.historyPageSize;
+  const pageRecords = records.slice(start, start + state.historyPageSize);
+  byId("history-page-label").textContent = `${state.historyPage} / ${totalPages}`;
+  byId("history-prev").disabled = state.historyPage <= 1;
+  byId("history-next").disabled = state.historyPage >= totalPages;
   if (!records.length) {
     tbody.innerHTML = `<tr><td colspan="7" class="empty">暂无生图记录。</td></tr>`;
     return;
   }
-  tbody.innerHTML = records.map((record, index) => {
+  tbody.innerHTML = pageRecords.map((record, offset) => {
+    const index = start + offset;
     const hasImages = Array.isArray(record.cache_items) && record.cache_items.length > 0;
     return `
       <tr>
@@ -829,12 +944,12 @@ async function loadHistory() {
 }
 
 function renderCacheSettings() {
-  byId("cache-enabled").checked = Boolean(state.cache.enabled);
-  byId("cache-max-mb").value = state.cache.max_mb || "";
-  byId("cache-max-hours").value = state.cache.max_hours || "";
-  byId("cache-max-count").value = state.cache.max_count || "";
-  byId("cache-total").textContent = state.cache.total_count || state.cache.images.length || 0;
-  byId("cache-size").textContent = formatBytes(state.cache.total_bytes || 0);
+  if (byId("cache-enabled")) byId("cache-enabled").checked = Boolean(state.cache.enabled);
+  if (byId("cache-max-mb")) byId("cache-max-mb").value = state.cache.max_mb || "";
+  if (byId("cache-max-hours")) byId("cache-max-hours").value = state.cache.max_hours || "";
+  if (byId("cache-max-count")) byId("cache-max-count").value = state.cache.max_count || "";
+  if (byId("cache-total")) byId("cache-total").textContent = state.cache.total_count || state.cache.images.length || 0;
+  if (byId("cache-size")) byId("cache-size").textContent = formatBytes(state.cache.total_bytes || 0);
   const sizeSelect = byId("cache-page-size");
   if (sizeSelect) sizeSelect.value = String(normalizeCachePageSize(state.cachePageSize));
 }
@@ -856,11 +971,14 @@ function renderCacheGrid() {
     return;
   }
   grid.innerHTML = pageItems.map((image, offset) => `
-    <button class="image-tile" data-preview-card data-preview-kind="cache" data-cache-id="${attrHtml(image.id || "")}" data-action="cache-slide" data-index="${start + offset}" type="button" title="${attrHtml(image.prompt || "")}">
-      <img alt="缓存图片 ${start + offset + 1}" loading="lazy" />
-      <span class="preview-placeholder">图片未加载成功</span>
-      <span class="image-tile-label">${escapeHtml(image.display_name || modeLabel(image.mode))}</span>
-    </button>
+    <figure class="image-tile" data-preview-card data-preview-kind="cache" data-cache-id="${attrHtml(image.id || "")}" title="${attrHtml(image.prompt || "")}">
+      <button class="image-preview" data-action="cache-slide" data-index="${start + offset}" type="button" aria-label="浏览缓存图片 ${start + offset + 1}">
+        <img alt="缓存图片 ${start + offset + 1}" loading="lazy" />
+        <span class="preview-placeholder">图片未加载成功</span>
+        <span class="image-tile-label">${escapeHtml(image.display_name || modeLabel(image.mode))}</span>
+      </button>
+      <button class="thumb-action" data-action="cache-image-delete" data-cache-id="${attrHtml(image.id || "")}" type="button" title="删除缓存图片" aria-label="删除缓存图片">×</button>
+    </figure>
   `).join("");
   loadPreviewImages(grid);
 }
@@ -881,6 +999,13 @@ async function loadCache() {
   };
   renderCacheGrid();
   setPageStatus();
+}
+
+async function refreshStatisticsView(button) {
+  setBusy(button, true, "刷新中...");
+  await loadHistory();
+  await loadCache();
+  setBusy(button, false);
 }
 
 async function toggleCache() {
@@ -963,6 +1088,12 @@ function activePersona() {
   if (!state.selfie.personas.length) return null;
   state.activePersonaIndex = Math.min(Math.max(0, state.activePersonaIndex), state.selfie.personas.length - 1);
   return state.selfie.personas[state.activePersonaIndex];
+}
+
+function activeStyle() {
+  if (!state.selfie.styles.length) return null;
+  state.activeStyleIndex = Math.min(Math.max(0, state.activeStyleIndex), state.selfie.styles.length - 1);
+  return state.selfie.styles[state.activeStyleIndex];
 }
 
 function renderPersonaList() {
@@ -1149,36 +1280,56 @@ function renderStyleControls() {
 
 function renderStyles() {
   renderStyleControls();
+  renderStyleList();
+  renderStyleEditor();
+}
+
+function renderStyleList() {
   const list = byId("style-list");
   if (!list) return;
   if (!state.selfie.styles.length) {
     list.innerHTML = `<div class="empty">当前没有自拍风格模板。</div>`;
     return;
   }
+  list.innerHTML = state.selfie.styles.map((style, index) => `
+    <button class="persona-button ${index === state.activeStyleIndex ? "active" : ""}" data-action="style-switch" data-index="${index}" type="button">
+      <strong>${escapeHtml(style.name || style.id)}</strong>
+      <small>${escapeHtml(style.id || "")} · ${style.enabled === false ? "已关闭" : "启用中"}</small>
+    </button>
+  `).join("");
+}
+
+function renderStyleEditor() {
+  const editor = byId("style-editor");
+  if (!editor) return;
+  const style = activeStyle();
+  if (!style) {
+    editor.innerHTML = `<div class="empty">还没有自拍风格，点击“添加风格”创建第一套模板。</div>`;
+    renderStyleList();
+    return;
+  }
   const styleSchema = state.schema?.selfie_styles?.templates?.selfie_style?.items || {};
-  list.innerHTML = state.selfie.styles.map((style, index) => {
-    const compatFields = Object.fromEntries(
-      Object.entries(style)
-        .filter(([fieldKey]) => fieldKey !== "__template_key" && !(fieldKey in styleSchema))
-        .map(([fieldKey, value]) => [fieldKey, inferCompatField(fieldKey, value)]),
-    );
-    const mergedFields = { ...styleSchema, ...compatFields };
-    const fields = Object.entries(mergedFields)
-      .map(([key, field]) => fieldHtml("style", index, key, field, style[key] ?? defaultValueForField(field)))
-      .join("");
-    return `
-      <article class="style-card">
-        <div class="style-card-head">
-          <div>
-            <strong>${escapeHtml(style.name || style.id)}</strong>
-            <small>${style.enabled === false ? "已关闭" : "启用中"}</small>
-          </div>
-          <button class="btn danger" data-action="style-delete" data-index="${index}" type="button">删除</button>
-        </div>
-        <div class="form-grid">${fields}</div>
-      </article>
-    `;
-  }).join("");
+  const index = state.activeStyleIndex;
+  const compatFields = Object.fromEntries(
+    Object.entries(style)
+      .filter(([fieldKey]) => fieldKey !== "__template_key" && !(fieldKey in styleSchema))
+      .map(([fieldKey, value]) => [fieldKey, inferCompatField(fieldKey, value)]),
+  );
+  const mergedFields = { ...styleSchema, ...compatFields };
+  const fields = Object.entries(mergedFields)
+    .map(([key, field]) => fieldHtml("style", index, key, field, style[key] ?? defaultValueForField(field)))
+    .join("");
+  editor.innerHTML = `
+    <div class="style-card-head">
+      <div>
+        <strong>${escapeHtml(style.name || style.id)}</strong>
+        <small>${style.enabled === false ? "已关闭" : "启用中"}</small>
+      </div>
+      <button class="btn danger" data-action="style-delete" data-index="${index}" type="button">删除当前风格</button>
+    </div>
+    <div class="form-grid">${fields}</div>
+  `;
+  renderStyleList();
 }
 
 async function saveStyles(button) {
@@ -1241,6 +1392,34 @@ async function updateSlide() {
   }
 }
 
+async function deleteCacheImage(cacheId) {
+  const image = (state.cache.images || []).find((item) => String(item.id || "") === String(cacheId || ""));
+  if (!image) return;
+  const confirmed = await askConfirm({
+    title: "删除缓存图片",
+    message: "确定删除这张缓存图片吗？生图统计记录会保留，但这张本地图片会从图库和统计预览中移除。",
+    confirmText: "删除",
+  });
+  if (!confirmed) return;
+  const result = await callApi("删除缓存图片", () => bridge.apiPost("delete_cache_image", {
+    cache_id: image.id,
+  }));
+  if (result?.success === false) return;
+  state.cache = {
+    ...state.cache,
+    enabled: Boolean(result.enabled),
+    max_mb: result.max_mb || state.cache.max_mb || "",
+    max_hours: result.max_hours || state.cache.max_hours || "",
+    max_count: result.max_count || state.cache.max_count || "",
+    total_count: Number(result.total_count || 0),
+    total_bytes: Number(result.total_bytes || 0),
+    images: Array.isArray(result.images) ? result.images : [],
+  };
+  renderCacheGrid();
+  await loadHistory();
+  showToast("缓存图片已删除。");
+}
+
 function personaSlideItems(persona) {
   if (!persona?.ref_image_items) return [];
   return persona.ref_image_items
@@ -1280,6 +1459,32 @@ function renderAllConfig() {
   renderStyles();
 }
 
+function switchTab(tab, { persist = true } = {}) {
+  const nextTab = normalizeTab(tab);
+  state.activeTab = nextTab;
+  state.pagePrefs.last_tab = nextTab;
+  safeStorageSet(LAST_TAB_KEY, nextTab);
+  document.querySelectorAll(".nav-item").forEach((item) => {
+    item.classList.toggle("active", item.dataset.tab === nextTab);
+  });
+  document.querySelectorAll(".tab-panel").forEach((panel) => {
+    panel.classList.toggle("active", panel.dataset.panel === nextTab);
+  });
+  if (persist) void persistPagePrefs({ last_tab: nextTab });
+}
+
+function applyLocalPagePrefs() {
+  state.pagePrefs.last_tab = normalizeTab(safeStorageGet(LAST_TAB_KEY, state.pagePrefs.last_tab));
+  state.pagePrefs.cache_page_size = normalizeCachePageSize(
+    safeStorageGet(CACHE_PAGE_SIZE_KEY, state.pagePrefs.cache_page_size),
+  );
+  state.pagePrefs.history_page_size = normalizeHistoryPageSize(
+    safeStorageGet(HISTORY_PAGE_SIZE_KEY, state.pagePrefs.history_page_size),
+  );
+  state.cachePageSize = state.pagePrefs.cache_page_size;
+  state.historyPageSize = state.pagePrefs.history_page_size;
+}
+
 async function waitForBridgeReady() {
   if (!window.AstrBotPluginPage) {
     setPageStatus("当前未检测到 AstrBot Dashboard bridge，页面以只读空壳模式启动。", "warn");
@@ -1313,8 +1518,11 @@ async function loadConfigBundle() {
       ? String(pagePrefs.theme).trim().toLowerCase()
       : DEFAULT_THEME,
     cache_page_size: normalizeCachePageSize(pagePrefs.cache_page_size),
+    history_page_size: normalizeHistoryPageSize(pagePrefs.history_page_size),
+    last_tab: normalizeTab(pagePrefs.last_tab),
   };
   state.cachePageSize = state.pagePrefs.cache_page_size;
+  state.historyPageSize = state.pagePrefs.history_page_size;
   applyTheme(state.pagePrefs.theme);
   const selfie = config.selfie || {};
   state.selfie = {
@@ -1328,16 +1536,16 @@ async function loadConfigBundle() {
     styles: normalizeStyles(selfie.styles || []),
   };
   state.activePersonaIndex = 0;
+  state.activeStyleIndex = 0;
   renderAllConfig();
+  switchTab(state.pagePrefs.last_tab, { persist: false });
   setPageStatus();
 }
 
 function bindEvents() {
   document.querySelectorAll(".nav-item").forEach((button) => {
     button.addEventListener("click", () => {
-      const tab = button.dataset.tab;
-      document.querySelectorAll(".nav-item").forEach((item) => item.classList.toggle("active", item === button));
-      document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.toggle("active", panel.dataset.panel === tab));
+      switchTab(button.dataset.tab);
     });
   });
 
@@ -1350,7 +1558,7 @@ function bindEvents() {
     renderPromptTemplates();
   });
   byId("save-templates")?.addEventListener("click", (event) => savePromptTemplates(event.currentTarget));
-  byId("refresh-history")?.addEventListener("click", loadHistory);
+  byId("refresh-history")?.addEventListener("click", (event) => refreshStatisticsView(event.currentTarget));
   byId("apply-filters")?.addEventListener("click", applyHistoryFilters);
   byId("cache-enabled")?.addEventListener("change", toggleCache);
   byId("save-cache-config")?.addEventListener("click", (event) => saveCacheConfig(event.currentTarget));
@@ -1370,6 +1578,22 @@ function bindEvents() {
     state.cachePage = 1;
     renderCacheGrid();
     void persistPagePrefs({ cache_page_size: state.cachePageSize });
+  });
+  byId("history-prev")?.addEventListener("click", () => {
+    state.historyPage -= 1;
+    renderHistory();
+  });
+  byId("history-next")?.addEventListener("click", () => {
+    state.historyPage += 1;
+    renderHistory();
+  });
+  byId("history-page-size")?.addEventListener("change", (event) => {
+    state.historyPageSize = normalizeHistoryPageSize(event.target.value);
+    state.pagePrefs.history_page_size = state.historyPageSize;
+    safeStorageSet(HISTORY_PAGE_SIZE_KEY, state.historyPageSize);
+    state.historyPage = 1;
+    renderHistory();
+    void persistPagePrefs({ history_page_size: state.historyPageSize });
   });
   byId("add-persona")?.addEventListener("click", () => {
     const index = state.selfie.personas.length + 1;
@@ -1397,6 +1621,7 @@ function bindEvents() {
       keywords: [],
       enabled: true,
     });
+    state.activeStyleIndex = state.selfie.styles.length - 1;
     renderStyles();
   });
   byId("save-styles")?.addEventListener("click", (event) => saveStyles(event.currentTarget));
@@ -1455,12 +1680,14 @@ function bindEvents() {
       }
     }
     if (action === "pipeline-up") {
-      moveItem(state.pipeline, index, index - 1);
-      renderPipeline();
+      reorderWithAnimation(byId("pipeline-list"), () => {
+        moveItem(state.pipeline, index, index - 1, state.expandedPipeline);
+      }, renderPipeline);
     }
     if (action === "pipeline-down") {
-      moveItem(state.pipeline, index, index + 1);
-      renderPipeline();
+      reorderWithAnimation(byId("pipeline-list"), () => {
+        moveItem(state.pipeline, index, index + 1, state.expandedPipeline);
+      }, renderPipeline);
     }
     if (action === "template-toggle") {
       state.expandedTemplates.has(index) ? state.expandedTemplates.delete(index) : state.expandedTemplates.add(index);
@@ -1480,12 +1707,14 @@ function bindEvents() {
       }
     }
     if (action === "template-up") {
-      moveItem(state.promptTemplates, index, index - 1);
-      renderPromptTemplates();
+      reorderWithAnimation(byId("template-list"), () => {
+        moveItem(state.promptTemplates, index, index - 1, state.expandedTemplates);
+      }, renderPromptTemplates);
     }
     if (action === "template-down") {
-      moveItem(state.promptTemplates, index, index + 1);
-      renderPromptTemplates();
+      reorderWithAnimation(byId("template-list"), () => {
+        moveItem(state.promptTemplates, index, index + 1, state.expandedTemplates);
+      }, renderPromptTemplates);
     }
     if (action === "history-slide") {
       const record = state.filteredHistory[index];
@@ -1496,6 +1725,9 @@ function bindEvents() {
     }
     if (action === "cache-slide") {
       openSlideshow(state.cache.images || [], index);
+    }
+    if (action === "cache-image-delete") {
+      await deleteCacheImage(actionButton.dataset.cacheId || "");
     }
     if (action === "persona-switch") {
       updateSelfieControlsFromEditor();
@@ -1525,6 +1757,10 @@ function bindEvents() {
       const startIndex = Math.max(0, slides.findIndex((item) => item.path === targetPath));
       openSlideshow(slides, startIndex);
     }
+    if (action === "style-switch") {
+      state.activeStyleIndex = index;
+      renderStyles();
+    }
     if (action === "style-delete") {
       const style = state.selfie.styles[index];
       const confirmed = await askConfirm({
@@ -1534,6 +1770,7 @@ function bindEvents() {
       });
       if (confirmed) {
         state.selfie.styles.splice(index, 1);
+        state.activeStyleIndex = Math.max(0, Math.min(state.activeStyleIndex, state.selfie.styles.length - 1));
         renderStyles();
       }
     }
@@ -1594,9 +1831,12 @@ function bindEvents() {
 
 async function init() {
   bindEvents();
+  applyLocalPagePrefs();
   applyTheme(getThemeValue());
   renderAllConfig();
+  switchTab(state.pagePrefs.last_tab, { persist: false });
   state.cachePageSize = normalizeCachePageSize(state.cachePageSize);
+  state.historyPageSize = normalizeHistoryPageSize(state.historyPageSize);
   const bridgeReady = await waitForBridgeReady();
   if (!bridgeReady) return;
   await loadConfigBundle();

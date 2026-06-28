@@ -30,9 +30,8 @@
         <nav class="nav-list" aria-label="FreeImage 控制台">
           <button class="nav-item active" data-tab="pipeline" type="button"><span>管线</span></button>
           <button class="nav-item" data-tab="templates" type="button"><span>模板</span></button>
-          <button class="nav-item" data-tab="history" type="button"><span>统计</span></button>
-          <button class="nav-item" data-tab="cache" type="button"><span>缓存</span></button>
           <button class="nav-item" data-tab="selfie" type="button"><span>自拍</span></button>
+          <button class="nav-item" data-tab="history" type="button"><span>统计</span></button>
         </nav>
         <div class="theme-panel" aria-label="主题设置">
           <span>主题</span>
@@ -51,6 +50,7 @@
             <div>
               <p class="eyebrow">Fallback rail</p>
               <h1>生图管线</h1>
+              <p class="sort-hint">长按拖拽排序</p>
             </div>
             <div class="toolbar">
               <button class="btn" id="add-pipeline" type="button">+ 添加节点</button>
@@ -68,6 +68,7 @@
             <div>
               <p class="eyebrow">Prompt deck</p>
               <h1>图生图模板</h1>
+              <p class="sort-hint">长按拖拽排序</p>
             </div>
             <div class="toolbar">
               <button class="btn" id="add-template" type="button">+ 添加模板</button>
@@ -75,6 +76,41 @@
             </div>
           </div>
           <div id="template-list" class="template-grid"></div>
+        </section>
+
+        <section class="tab-panel" data-panel="selfie">
+          <div class="page-head">
+            <div>
+              <p class="eyebrow">Persona lab</p>
+              <h1>自拍人设</h1>
+            </div>
+            <div class="toolbar">
+              <button class="btn" id="add-persona" type="button">+ 添加人设</button>
+              <button class="btn primary" id="save-personas" type="button">保存人设</button>
+            </div>
+          </div>
+          <div class="selfie-layout">
+            <div class="persona-list" id="persona-list"></div>
+            <div class="editor-pane" id="persona-editor"></div>
+          </div>
+          <div class="style-head">
+            <div>
+              <p class="eyebrow">Style bank</p>
+              <h2>自拍风格</h2>
+            </div>
+            <div class="toolbar">
+              <button class="btn" id="add-style" type="button">+ 添加风格</button>
+              <button class="btn primary" id="save-styles" type="button">保存风格</button>
+            </div>
+          </div>
+          <div class="style-controls">
+            <label>风格模式<select id="style-mode"></select></label>
+            <label>指定风格 ID<input id="style-selected-id" type="text" /></label>
+          </div>
+          <div class="style-layout">
+            <div class="persona-list style-list" id="style-list"></div>
+            <div class="editor-pane" id="style-editor"></div>
+          </div>
         </section>
 
         <section class="tab-panel" data-panel="history">
@@ -109,6 +145,14 @@
             <input id="filter-user" type="search" placeholder="触发人" />
             <select id="filter-mode"></select>
             <select id="filter-model"></select>
+            <label class="page-size-control">每页
+              <select id="history-page-size">
+                <option>10</option>
+                <option>20</option>
+                <option>50</option>
+                <option>100</option>
+              </select>
+            </label>
             <button class="btn" id="apply-filters" type="button">筛选</button>
           </div>
           <div class="table-wrap">
@@ -127,10 +171,13 @@
               <tbody id="history-body"></tbody>
             </table>
           </div>
-        </section>
+          <div class="pager history-pager">
+            <button class="btn" id="history-prev" type="button">上一页</button>
+            <span id="history-page-label">1 / 1</span>
+            <button class="btn" id="history-next" type="button">下一页</button>
+          </div>
 
-        <section class="tab-panel" data-panel="cache">
-          <div class="page-head">
+          <div class="section-head">
             <div>
               <p class="eyebrow">Cache contact sheet</p>
               <h1>缓存图库</h1>
@@ -168,38 +215,6 @@
             <span id="cache-page-label">1 / 1</span>
             <button class="btn" id="cache-next" type="button">下一页</button>
           </div>
-        </section>
-
-        <section class="tab-panel" data-panel="selfie">
-          <div class="page-head">
-            <div>
-              <p class="eyebrow">Persona lab</p>
-              <h1>自拍人设</h1>
-            </div>
-            <div class="toolbar">
-              <button class="btn" id="add-persona" type="button">+ 添加人设</button>
-              <button class="btn primary" id="save-personas" type="button">保存人设</button>
-            </div>
-          </div>
-          <div class="selfie-layout">
-            <div class="persona-list" id="persona-list"></div>
-            <div class="editor-pane" id="persona-editor"></div>
-          </div>
-          <div class="style-head">
-            <div>
-              <p class="eyebrow">Style bank</p>
-              <h2>自拍风格</h2>
-            </div>
-            <div class="toolbar">
-              <button class="btn" id="add-style" type="button">+ 添加风格</button>
-              <button class="btn primary" id="save-styles" type="button">保存风格</button>
-            </div>
-          </div>
-          <div class="style-controls">
-            <label>风格模式<select id="style-mode"></select></label>
-            <label>指定风格 ID<input id="style-selected-id" type="text" /></label>
-          </div>
-          <div id="style-list" class="style-list"></div>
         </section>
       </main>
     </div>
