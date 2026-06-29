@@ -18,7 +18,7 @@ class ImageWorkflow:
         self.proxy = proxy_url
 
     async def _download_image(self, url: str) -> bytes | None:
-        download_timeout = self.conf.get("download_timeout", 30)
+        download_timeout = self.conf.get("general", {}).get("download_timeout", 30)
         try:
             async with self.session.get(url, proxy=self.proxy, timeout=download_timeout) as resp:
                 resp.raise_for_status()

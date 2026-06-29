@@ -1308,7 +1308,10 @@ function renderStyleEditor() {
     renderStyleList();
     return;
   }
-  const styleSchema = state.schema?.selfie_styles?.templates?.selfie_style?.items || {};
+  const selfieSchemaItems = state.schema?.selfie?.items || {};
+  const styleSchema = (
+    selfieSchemaItems.selfie_styles || state.schema?.selfie_styles || {}
+  ).templates?.selfie_style?.items || {};
   const index = state.activeStyleIndex;
   const compatFields = Object.fromEntries(
     Object.entries(style)

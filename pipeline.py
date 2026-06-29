@@ -36,7 +36,7 @@ class ImageGenPipeline:
         )
 
     async def check_rate_limit(self) -> Optional[str]:
-        rate_limit = self.conf.get("rate_limit_seconds", 120)
+        rate_limit = self.conf.get("quota", {}).get("rate_limit_seconds", 120)
         if rate_limit <= 0:
             return None
         async with self.api_call_lock:

@@ -162,7 +162,7 @@ class CommandHandlers:
 
     async def on_image_gen_request(self, event: AstrMessageEvent):
         p = self.plugin
-        if p.conf.get("prefix", True) and not event.is_at_or_wake_command:
+        if p.conf.get("general", {}).get("prefix", True) and not event.is_at_or_wake_command:
             return
         text = p._get_plain_message_text(event, strip_wake_prefix=True)
         if not text:
@@ -382,14 +382,14 @@ class CommandHandlers:
             return
 
         if raw == "开启":
-            p.conf["enable_image_cache"] = True
+            p.conf.setdefault("cache", {})["enable_image_cache"] = True
             await p.save_config_and_refresh_runtime()
             yield event.plain_result("✅ 画图缓存已开启。")
             event.stop_event()
             return
 
         if raw == "关闭":
-            p.conf["enable_image_cache"] = False
+            p.conf.setdefault("cache", {})["enable_image_cache"] = False
             await p.save_config_and_refresh_runtime()
             yield event.plain_result("✅ 画图缓存已关闭。")
             event.stop_event()
@@ -435,7 +435,7 @@ class CommandHandlers:
             yield event.plain_result("命令格式或参数错误，请重试。")
             event.stop_event()
             return
-        p.conf["concise_mode"] = raw == "开启"
+        p.conf.setdefault("general", {})["concise_mode"] = raw == "开启"
         p.conf.save_config()
         yield event.plain_result("操作成功。")
         event.stop_event()
@@ -463,7 +463,8 @@ class CommandHandlers:
 
     async def on_checkin(self, event: AstrMessageEvent):
         p = self.plugin
-        if not p.conf.get("enable_checkin", False):
+        checkin_conf = p.conf.get("checkin", {})
+        if not checkin_conf.get("enable_checkin", False):
             yield event.plain_result("📅 本机器人未开启签到功能。")
             return
         user_id = event.get_sender_id()
@@ -473,11 +474,11 @@ class CommandHandlers:
                 f"您今天已经签到过了。\n剩余次数: {p.persistence.get_user_count(user_id)}"
             )
             return
-        if str(p.conf.get("enable_random_checkin", False)).lower() == "true":
-            max_reward = max(1, int(p.conf.get("checkin_random_reward_max", 5)))
+        if str(checkin_conf.get("enable_random_checkin", False)).lower() == "true":
+            max_reward = max(1, int(checkin_conf.get("checkin_random_reward_max", 5)))
             reward = random.randint(1, max_reward)
         else:
-            reward = int(p.conf.get("checkin_fixed_reward", 3))
+            reward = int(checkin_conf.get("checkin_fixed_reward", 3))
         await p.persistence.add_permanent_user_count(user_id, reward)
         await p.persistence.save_user_checkin(user_id, today_str)
         new_total_count = p.persistence.get_user_count(user_id)
@@ -556,8 +557,9 @@ class CommandHandlers:
 
     async def on_selfie_help(self, event: AstrMessageEvent):
         p = self.plugin
-        mode = p.conf.get("selfie_style_mode", "自动")
-        binding = p.conf.get("selfie_binding_mode", "优先 AstrBot persona")
+        selfie_conf = p.conf.get("selfie", {})
+        mode = selfie_conf.get("selfie_style_mode", "自动")
+        binding = selfie_conf.get("selfie_binding_mode", "优先 AstrBot persona")
         yield event.plain_result(
             "📸 自拍命令\n"
             f"当前风格模式：{mode}  绑定模式：{binding}\n\n"
@@ -572,7 +574,7 @@ class CommandHandlers:
         action = p._strip_command_prefix(
             p._get_plain_message_text(event, strip_wake_prefix=True), "自拍"
         ).strip()
-        if p.conf.get("concise_mode", False) and bool(event.get_group_id()):
+        if p.conf.get("general", {}).get("concise_mode", False) and bool(event.get_group_id()):
             try:
                 bot = getattr(event, "bot", None)
                 if not bot:
@@ -637,7 +639,7 @@ class CommandHandlers:
         personas = _all_personas(p.conf)
         if not personas:
             return "当前还没有自拍人设。"
-        default_id = p.conf.get("selfie_default_persona_id", "")
+        default_id = p.conf.get("selfie", {}).get("selfie_default_persona_id", "")
         lines = ["自拍人设列表："]
         for persona in personas:
             pid = persona.get("id", "")
@@ -706,7 +708,8 @@ class CommandHandlers:
             await loop.run_in_executor(None, path.write_bytes, img_bytes)
             saved_paths.append(str(path))
 
-        personas = list(p.conf.get("selfie_personas", []) or [])
+        selfie_conf = p.conf.setdefault("selfie", {})
+        personas = list(selfie_conf.get("selfie_personas", []) or [])
         personas.append(
             {
                 "__template_key": "selfie_persona",
@@ -716,7 +719,7 @@ class CommandHandlers:
                 "ref_images": saved_paths,
             }
         )
-        p.conf["selfie_personas"] = personas
+        selfie_conf["selfie_personas"] = personas
         p.conf.save_config()
         return f"✅ 已保存自拍人设「{name}」（{pid}），参考图 {len(saved_paths)} 张。"
 
@@ -728,7 +731,8 @@ class CommandHandlers:
         sid = str(event.unified_msg_origin or "").strip()
         if not sid:
             return "无法获取当前会话 SID，绑定失败。"
-        personas = list(p.conf.get("selfie_personas") or [])
+        selfie_conf = p.conf.setdefault("selfie", {})
+        personas = list(selfie_conf.get("selfie_personas") or [])
         pid = persona.get("id")
         for entry in personas:
             if not isinstance(entry, dict):
@@ -741,7 +745,7 @@ class CommandHandlers:
             elif sid in sids:
                 sids.remove(sid)
                 entry["bound_sids"] = sids
-        p.conf["selfie_personas"] = personas
+        selfie_conf["selfie_personas"] = personas
         p.conf.save_config()
         return f"✅ 已将当前会话（{sid}）绑定至人设「{persona.get('name')}」。"
 
@@ -750,7 +754,7 @@ class CommandHandlers:
         persona = find_persona(p.conf, args)
         if not persona:
             return f"找不到自拍人设：{args}。"
-        p.conf["selfie_default_persona_id"] = persona.get("id")
+        p.conf.setdefault("selfie", {})["selfie_default_persona_id"] = persona.get("id")
         p.conf.save_config()
         return f"✅ 已将全局默认人设设为「{persona.get('name')}」。"
 
@@ -801,8 +805,9 @@ class CommandHandlers:
         styles = _all_styles(p.conf)
         if not styles:
             return "当前风格模板库为空。"
-        selected = p.conf.get("selfie_selected_style_id", "")
-        mode = p.conf.get("selfie_style_mode", "自动")
+        selfie_conf = p.conf.get("selfie", {})
+        selected = selfie_conf.get("selfie_selected_style_id", "")
+        mode = selfie_conf.get("selfie_style_mode", "自动")
         lines = [f"自拍风格列表（当前模式：{mode}）："]
         for style in styles:
             flag = "→" if style.get("id") == selected else " "
@@ -816,8 +821,9 @@ class CommandHandlers:
             if not style:
                 return f"找不到自拍风格：{query}。"
         else:
-            mode = p.conf.get("selfie_style_mode", "自动")
-            selected = p.conf.get("selfie_selected_style_id", "")
+            selfie_conf = p.conf.get("selfie", {})
+            mode = selfie_conf.get("selfie_style_mode", "自动")
+            selected = selfie_conf.get("selfie_selected_style_id", "")
             style = find_style(p.conf, selected) if selected else None
             if not style:
                 return f"当前模式：{mode}，未指定默认风格。"
@@ -848,7 +854,8 @@ class CommandHandlers:
 
         if any(style.get("id") == sid for style in _all_styles(p.conf)):
             return f"自拍风格 ID 已存在：{sid}。"
-        styles = list(p.conf.get("selfie_styles", []) or [])
+        selfie_conf = p.conf.setdefault("selfie", {})
+        styles = list(selfie_conf.get("selfie_styles", []) or [])
         styles.append(
             {
                 "__template_key": "selfie_style",
@@ -859,7 +866,7 @@ class CommandHandlers:
                 "enabled": True,
             }
         )
-        p.conf["selfie_styles"] = styles
+        selfie_conf["selfie_styles"] = styles
         p.conf.save_config()
         return f"✅ 已添加自拍风格「{name}」（{sid}）。"
 
@@ -869,7 +876,7 @@ class CommandHandlers:
         mode = mode_map.get(args.strip())
         if not mode:
             return "支持的模式：不注入、自动、指定。"
-        p.conf["selfie_style_mode"] = mode
+        p.conf.setdefault("selfie", {})["selfie_style_mode"] = mode
         p.conf.save_config()
         return f"✅ 自拍风格注入模式已设为「{mode}」。"
 
@@ -878,6 +885,6 @@ class CommandHandlers:
         style = find_style(p.conf, args)
         if not style:
             return f"找不到自拍风格：{args}。"
-        p.conf["selfie_selected_style_id"] = style.get("id")
+        p.conf.setdefault("selfie", {})["selfie_selected_style_id"] = style.get("id")
         p.conf.save_config()
         return f"✅ 已将指定风格设为「{style.get('name')}」（{style.get('id')}）。"

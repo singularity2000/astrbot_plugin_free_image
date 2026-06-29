@@ -9,7 +9,6 @@ from astrbot import logger
 from astrbot.core import AstrBotConfig
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
-
 class PersistenceManager:
     def __init__(self, config: AstrBotConfig, data_dir: Path):
         self.conf = config
@@ -57,7 +56,7 @@ class PersistenceManager:
 
     def get_user_count(self, user_id: str) -> int:
         permanent = self.user_counts.get(str(user_id), 0)
-        daily_quota = self.conf.get("user_daily_fixed_quota", 0)
+        daily_quota = self.conf.get("quota", {}).get("user_daily_fixed_quota", 0)
         if daily_quota <= 0:
             return permanent
 
@@ -73,7 +72,7 @@ class PersistenceManager:
             await self._save_json(self.user_counts_file, self.user_counts)
             return
 
-        daily_quota = self.conf.get("user_daily_fixed_quota", 0)
+        daily_quota = self.conf.get("quota", {}).get("user_daily_fixed_quota", 0)
         if daily_quota > 0:
             today = datetime.now().strftime("%Y-%m-%d")
             daily_data = self.user_daily_counts.get(uid, {})
@@ -84,7 +83,7 @@ class PersistenceManager:
 
     def get_group_count(self, group_id: str) -> int:
         permanent = self.group_counts.get(str(group_id), 0)
-        daily_quota = self.conf.get("group_daily_fixed_quota", 0)
+        daily_quota = self.conf.get("quota", {}).get("group_daily_fixed_quota", 0)
         if daily_quota <= 0:
             return permanent
 
@@ -100,7 +99,7 @@ class PersistenceManager:
             await self._save_json(self.group_counts_file, self.group_counts)
             return
 
-        daily_quota = self.conf.get("group_daily_fixed_quota", 0)
+        daily_quota = self.conf.get("quota", {}).get("group_daily_fixed_quota", 0)
         if daily_quota > 0:
             today = datetime.now().strftime("%Y-%m-%d")
             daily_data = self.group_daily_counts.get(gid, {})
@@ -110,8 +109,9 @@ class PersistenceManager:
                 await self._save_json(self.group_daily_counts_file, self.group_daily_counts)
 
     def check_count_available(self, user_id: str, group_id: Optional[str]) -> Optional[str]:
-        user_limit_on = self.conf.get("enable_user_limit", True)
-        group_limit_on = self.conf.get("enable_group_limit", False) and group_id
+        quota = self.conf.get("quota", {})
+        user_limit_on = quota.get("enable_user_limit", True)
+        group_limit_on = quota.get("enable_group_limit", False) and group_id
 
         if group_limit_on and self.get_group_count(group_id) > 0:
             return None
@@ -132,8 +132,9 @@ class PersistenceManager:
         if error := self.check_count_available(user_id, group_id):
             return error
 
-        user_limit_on = self.conf.get("enable_user_limit", True)
-        group_limit_on = self.conf.get("enable_group_limit", False) and group_id
+        quota = self.conf.get("quota", {})
+        user_limit_on = quota.get("enable_user_limit", True)
+        group_limit_on = quota.get("enable_group_limit", False) and group_id
         if group_limit_on and self.get_group_count(group_id) > 0:
             await self.decrease_group_count(group_id)
             return None
@@ -174,18 +175,19 @@ class UsageGuard:
         sender_id = event.get_sender_id()
         group_id = event.get_group_id()
 
-        if sender_id in self.conf.get("user_blacklist", []):
+        access_control = self.conf.get("access_control", {})
+        if sender_id in access_control.get("user_blacklist", []):
             return ""
-        if group_id and group_id in self.conf.get("group_blacklist", []):
+        if group_id and group_id in access_control.get("group_blacklist", []):
             return ""
-        if self.conf.get("user_whitelist", []) and sender_id not in self.conf.get(
+        if access_control.get("user_whitelist", []) and sender_id not in access_control.get(
             "user_whitelist", []
         ):
             return ""
         if (
             group_id
-            and self.conf.get("group_whitelist", [])
-            and group_id not in self.conf.get("group_whitelist", [])
+            and access_control.get("group_whitelist", [])
+            and group_id not in access_control.get("group_whitelist", [])
         ):
             return ""
 

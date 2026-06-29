@@ -38,11 +38,12 @@ class ImageResultSender:
         if is_master:
             caption_parts.append("管理员剩余次数: ∞")
         else:
-            if self.conf.get("enable_user_limit", True):
+            quota = self.conf.get("quota", {})
+            if quota.get("enable_user_limit", True):
                 caption_parts.append(
                     f"个人剩余次数: {self.persistence.get_user_count(sender_id)}"
                 )
-            if self.conf.get("enable_group_limit", False) and group_id:
+            if quota.get("enable_group_limit", False) and group_id:
                 caption_parts.append(
                     f"本群剩余次数: {self.persistence.get_group_count(group_id)}"
                 )
@@ -57,7 +58,7 @@ class ImageResultSender:
         *,
         request_source: Literal["command", "llm_tool"],
     ) -> bool:
-        mode = self.conf.get("quote_reply_mode", "始终引用回复")
+        mode = self.conf.get("general", {}).get("quote_reply_mode", "始终引用回复")
         if mode == "始终单独发送":
             return False
         if mode == "命令引用回复，函数调用单独发送":
@@ -67,7 +68,7 @@ class ImageResultSender:
         return True
 
     def _should_split_multi_images(self, *, event: AstrMessageEvent) -> bool:
-        mode = self.conf.get("multi_image_send_mode", "始终不分条")
+        mode = self.conf.get("general", {}).get("multi_image_send_mode", "始终不分条")
         is_group = bool(event.get_group_id())
         if mode == "始终分条":
             return True

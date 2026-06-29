@@ -10,7 +10,7 @@ from astrbot.core import AstrBotConfig
 # ─────────────────────────── 人设 ───────────────────────────
 
 def _all_personas(conf: AstrBotConfig) -> list[dict]:
-    raw = conf.get("selfie_personas", [])
+    raw = conf.get("selfie", {}).get("selfie_personas", [])
     return [p for p in raw if isinstance(p, dict) and str(p.get("id", "")).strip()]
 
 
@@ -29,7 +29,8 @@ def find_persona(conf: AstrBotConfig, query: str) -> Optional[dict]:
 
 async def resolve_persona(conf: AstrBotConfig, context, event, session_id: str) -> Optional[dict]:
     """按绑定模式从配置中解析当前应使用的人设。返回 None 表示未配置。"""
-    mode = conf.get("selfie_binding_mode", "优先 AstrBot persona")
+    selfie_conf = conf.get("selfie", {})
+    mode = selfie_conf.get("selfie_binding_mode", "优先 AstrBot persona")
     personas = _all_personas(conf)
     if not personas:
         return None
@@ -38,7 +39,7 @@ async def resolve_persona(conf: AstrBotConfig, context, event, session_id: str) 
         pid = str(pid).strip()
         return next((p for p in personas if p.get("id") == pid), None)
 
-    default_id = conf.get("selfie_default_persona_id", "")
+    default_id = selfie_conf.get("selfie_default_persona_id", "")
     default_persona = by_id(default_id) if default_id else (personas[0] if personas else None)
 
     def by_sid(sid: str) -> Optional[dict]:
@@ -91,7 +92,7 @@ async def resolve_persona(conf: AstrBotConfig, context, event, session_id: str) 
     if mode == "优先会话 SID":
         return by_sid(session_id) or by_astrbot_persona(active_astrbot_persona_id) or default_persona
     if mode == "只使用手动指定的selfie人设":
-        override_id = str(conf.get("selfie_persona_manual_override", "") or "").strip()
+        override_id = str(selfie_conf.get("selfie_persona_manual_override", "") or "").strip()
         return by_id(override_id) or default_persona
     return default_persona
 
@@ -116,7 +117,7 @@ async def load_persona_images(persona: dict) -> list[bytes]:
 # ─────────────────────────── 风格 ───────────────────────────
 
 def _all_styles(conf: AstrBotConfig) -> list[dict]:
-    raw = conf.get("selfie_styles", [])
+    raw = conf.get("selfie", {}).get("selfie_styles", [])
     return [s for s in raw if isinstance(s, dict) and str(s.get("id", "")).strip() and s.get("enabled", True)]
 
 
@@ -175,11 +176,12 @@ def resolve_style(conf: AstrBotConfig, text: str, style_id_override: str = "") -
     if style_id_override:
         return find_style(conf, style_id_override)
 
-    mode = conf.get("selfie_style_mode", "自动")
+    selfie_conf = conf.get("selfie", {})
+    mode = selfie_conf.get("selfie_style_mode", "自动")
     if mode == "不注入":
         return None
     if mode == "指定":
-        selected = conf.get("selfie_selected_style_id", "")
+        selected = selfie_conf.get("selfie_selected_style_id", "")
         return find_style(conf, selected) if selected else None
     # 自动
     return auto_select_style(conf, text)

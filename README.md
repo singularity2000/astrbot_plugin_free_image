@@ -35,23 +35,23 @@
 | 配置项 | 说明 |
 | :--- | :--- |
 | `api_pipeline` | 图片生成 Provider 管线，决定模型、API 地址、Key、代理、超时和重试。 |
-| `prefix` | 是否要求命令带前缀或 @机器人 唤醒，推荐开启。 |
 | `prompt_list` | 预设模板列表，格式为 `触发词:提示词`。 |
-| `concise_mode` | QQ 群聊简洁模式：收到画图请求贴 OK 表情（124），收到自拍请求贴爱心表情（66），成功后只发图片。 |
-| `quote_reply_mode` | 控制生成成功后的图片消息是否引用回复。 |
-| `multi_image_send_mode` | 控制多图结果是否合并发送或分条发送。 |
-| `download_timeout` | 下载用户图片、头像或远程结果图片的超时时间。 |
-| `enable_image_cache` | 是否保存成功生成的图片缓存。关闭后仍会记录生图历史，但不保存图片文件。 |
-| `image_cache_max_size_mb` | 最大缓存大小（MB），留空或 0 表示不限制。 |
-| `image_cache_max_age_hours` | 最长缓存保存时间（小时），留空或 0 表示不限制。 |
-| `image_cache_max_count` | 最多保存缓存图片张数，留空或 0 表示不限制。 |
-| `rate_limit_seconds` | 非管理员全局生图冷却时间。 |
-| `llm_tool_description` | LLM 看到的普通画图工具描述。 |
-| `llm_prompt_description` | LLM 构造最终生图 Prompt 时参考的描述。 |
-| `selfie_binding_mode` | 自拍人设绑定模式，默认"优先 AstrBot persona"。 |
-| `selfie_default_persona_id` | 全局默认自拍人设 ID，留空则自动取列表第一个。 |
-| `selfie_persona_manual_override` | 手动指定 selfie 人设 ID，仅在“只使用手动指定的selfie人设”模式下生效。 |
-| `selfie_style_mode` | 自拍风格注入模式：不注入 / 自动 / 指定。 |
+| `general.prefix` | 是否要求命令带前缀或 @机器人 唤醒，推荐开启。 |
+| `general.concise_mode` | QQ 群聊简洁模式：收到画图请求贴 OK 表情（124），收到自拍请求贴爱心表情（66），成功后只发图片。 |
+| `general.quote_reply_mode` | 控制生成成功后的图片消息是否引用回复。 |
+| `general.multi_image_send_mode` | 控制多图结果是否合并发送或分条发送。 |
+| `general.download_timeout` | 下载用户图片、头像或远程结果图片的超时时间。 |
+| `cache.enable_image_cache` | 是否保存成功生成的图片缓存。关闭后仍会记录生图历史，但不保存图片文件。 |
+| `cache.image_cache_max_size_mb` | 最大缓存大小（MB），留空或 0 表示不限制。 |
+| `cache.image_cache_max_age_hours` | 最长缓存保存时间（小时），留空或 0 表示不限制。 |
+| `cache.image_cache_max_count` | 最多保存缓存图片张数，留空或 0 表示不限制。 |
+| `quota.rate_limit_seconds` | 非管理员全局生图冷却时间。 |
+| `llm_tools.llm_tool_description` | LLM 看到的普通画图工具描述。 |
+| `llm_tools.llm_prompt_description` | LLM 构造最终生图 Prompt 时参考的描述。 |
+| `selfie.selfie_binding_mode` | 自拍人设绑定模式，默认"优先 AstrBot persona"。 |
+| `selfie.selfie_default_persona_id` | 全局默认自拍人设 ID，留空则自动取列表第一个。 |
+| `selfie.selfie_persona_manual_override` | 手动指定 selfie 人设 ID，仅在“只使用手动指定的selfie人设”模式下生效。 |
+| `selfie.selfie_style_mode` | 自拍风格注入模式：不注入 / 自动 / 指定。 |
 
 ## 用户命令
 
@@ -82,7 +82,7 @@
 3. 当前消息中 @ 的 QQ 用户头像
 4. 发送者自己的 QQ 头像
 
-如果你开启了 `prefix=true`，模板触发也需要命令前缀或 @机器人 唤醒，避免日常聊天误触。
+如果你开启了 `general.prefix=true`，模板触发也需要命令前缀或 @机器人 唤醒，避免日常聊天误触。
 
 ### 指定模型生图
 
@@ -115,7 +115,7 @@
 | `#画图模型 开启 <序号>` | 启用指定节点。 | `#画图模型 开启 2` |
 | `#画图模型 关闭 <序号>` | 关闭指定节点。 | `#画图模型 关闭 2` |
 | `#画图缓存 状态/开启/关闭/清理` | 查看、开关或清理生成图片缓存。清理会删除全部已保存缓存图片，不删除生图历史记录。 | `#画图缓存 状态` |
-| `#画图简洁模式 开启/关闭` | 切换简洁模式，等效于 WebUI 的 `concise_mode` 开关。 | `#画图简洁模式 开启` |
+| `#画图简洁模式 开启/关闭` | 切换简洁模式，等效于 WebUI 的 `general.concise_mode` 开关。 | `#画图简洁模式 开启` |
 | `#画图增加用户次数` | 给用户增加永久次数，支持 @ 或 QQ 号。 | `#画图增加用户次数 @某人 10` |
 | `#画图增加群组次数` | 给群组增加永久次数。 | `#画图增加群组次数 987654 50` |
 | `#画图查询次数 @用户` | 管理员查询指定用户次数。 | `#画图查询次数 @某人` |
@@ -147,8 +147,8 @@ API Key 请统一在 AstrBot WebUI 的 `api_pipeline` 节点中配置和管理�
 
 | 配置项 | 可选值 |
 | :--- | :--- |
-| `quote_reply_mode` | `始终引用回复`、`始终单独发送`、`命令引用回复，函数调用单独发送`、`命令单独发送，函数调用引用回复` |
-| `multi_image_send_mode` | `始终不分条`、`始终分条`、`群聊不分条，私聊分条`、`群聊分条，私聊不分条` |
+| `general.quote_reply_mode` | `始终引用回复`、`始终单独发送`、`命令引用回复，函数调用单独发送`、`命令单独发送，函数调用引用回复` |
+| `general.multi_image_send_mode` | `始终不分条`、`始终分条`、`群聊不分条，私聊分条`、`群聊分条，私聊不分条` |
 
 ## Provider 支持
 
@@ -235,11 +235,11 @@ Provider 行为说明：
 
 **第二步：绑定人设（可选）**
 
-插件提供三种绑定模式（在 WebUI 的 `selfie_binding_mode` 中选择）：
+插件提供三种绑定模式（在 WebUI 的 `selfie.selfie_binding_mode` 中选择）：
 
 - **优先 AstrBot persona（默认）**：根据当前对话使用的 AstrBot persona 自动匹配自拍人设。在 WebUI 的人设库里，每个人设条目内有"绑定的 AstrBot Persona 名称列表"，填入 AstrBot persona 的名称即可。找不到再回退到会话 SID 绑定，再找不到用全局默认。
 - **优先会话 SID**：先按当前群/私聊绑定，找不到再按 AstrBot persona，再找不到用全局默认。适合同一 persona 在不同群显示不同形象。
-- **只使用手动指定的selfie人设**：始终用 `selfie_persona_manual_override` 中填写的人设，找不到则回退到全局默认。适合极简配置。
+- **只使用手动指定的selfie人设**：始终用 `selfie.selfie_persona_manual_override` 中填写的人设，找不到则回退到全局默认。适合极简配置。
 
 用命令绑定**当前会话 SID** 到指定人设：
 
@@ -247,7 +247,7 @@ Provider 行为说明：
 #自拍人设 绑定 椰子
 ```
 
-不绑定时，插件会使用全局默认人设（用 `#自拍人设 默认 <名称>` 设置，或在 WebUI 的 `selfie_default_persona_id` 中填写）。全局默认也未设置时，自动取人设库第一个。
+不绑定时，插件会使用全局默认人设（用 `#自拍人设 默认 <名称>` 设置，或在 WebUI 的 `selfie.selfie_default_persona_id` 中填写）。全局默认也未设置时，自动取人设库第一个。
 
 **第三步：生成自拍**
 
@@ -259,7 +259,7 @@ Provider 行为说明：
 
 自拍输出行为：
 
-- `#自拍` 命令受 `concise_mode` 控制。QQ 群聊开启简洁模式时，触发后尝试贴 `[表情:66]`，成功后只发图片；关闭简洁模式时，会发送“正在生成”和成功说明。
+- `#自拍` 命令受 `general.concise_mode` 控制。QQ 群聊开启简洁模式时，触发后尝试贴 `[表情:66]`，成功后只发图片；关闭简洁模式时，会发送“正在生成”和成功说明。
 - `send_selfie` 函数工具始终按简洁模式发送结果，不给用户发送机械化成功文案；aiocqhttp 群聊中会尝试贴 `[表情:66]`，失败只记录 debug 日志，不影响生成。
 - 成功状态会写入 info 日志，格式类似：`✅ 生成成功 (50.48s) | 人设: xx | 风格: 自拍专用极致真实 | 个人剩余次数: 8 | 模型: gpt-image-2`。
 
@@ -347,7 +347,7 @@ AstrBot 分配给本插件的数据目录（通常位于 data/plugin_data/astrbo
 
 ### 模板触发没反应
 
-先用 `#画图帮助` 确认模板名是否存在。如果开启了 `prefix=true`，请使用命令前缀或 @机器人 唤醒。
+先用 `#画图帮助` 确认模板名是否存在。如果开启了 `general.prefix=true`，请使用命令前缀或 @机器人 唤醒。
 
 ### 图生图提示“请发送或引用一张图片”
 

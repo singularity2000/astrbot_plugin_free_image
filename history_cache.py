@@ -12,7 +12,6 @@ from typing import Any
 
 from astrbot import logger
 
-
 HISTORY_VERSION = 1
 CACHE_VERSION = 1
 
@@ -256,7 +255,7 @@ class ImageHistoryCache:
         return None
 
     def cache_enabled(self) -> bool:
-        return bool(self.conf.get("enable_image_cache", False))
+        return bool(self.conf.get("cache", {}).get("enable_image_cache", False))
 
     def _cleanup_cache_locked(
         self, *, reason: str, clear_all: bool = False
@@ -552,7 +551,7 @@ class ImageHistoryCache:
             return None
 
     def _raw_limit(self, key: str) -> str:
-        value = self.conf.get(key, "")
+        value = self.conf.get("cache", {}).get(key, "")
         return "" if value is None else str(value)
 
     def _positive_float(self, key: str) -> float | None:

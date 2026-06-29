@@ -41,7 +41,7 @@ PLUGIN_NAME = "astrbot_plugin_free_image"
     PLUGIN_NAME,
     "Singularity2000",
     "文生图、图生图，可自定义提示词模板，兼容多种端点",
-    "3.5.1",
+    "3.5.2",
     "https://github.com/singularity2000/astrbot_plugin_free_image",
 )
 class ImageGenerationPlugin(Star):
@@ -76,14 +76,15 @@ class ImageGenerationPlugin(Star):
 
     def _refresh_llm_tool_descriptions(self) -> None:
         """同步配置到自动注册的 LLM 工具描述。"""
+        llm_tools = self.conf.get("llm_tools", {})
         tool = self.context.get_llm_tool_manager().get_func("image_generation")
         if tool:
-            tool.description = self.conf.get(
+            tool.description = llm_tools.get(
                 "llm_tool_description",
                 "专业的文生图、图生图工具。理解用户语义，仅当用户需要你生图，或修改图片内容时才调用此工具。",
             )
 
-            custom_prompt_desc = self.conf.get(
+            custom_prompt_desc = llm_tools.get(
                 "llm_prompt_description",
                 "Change the user's input into a professional image generation prompt while strictly preserving the original intent.",
             )
@@ -97,11 +98,11 @@ class ImageGenerationPlugin(Star):
 
         selfie_tool = self.context.get_llm_tool_manager().get_func("send_selfie")
         if selfie_tool:
-            selfie_tool.description = self.conf.get(
+            selfie_tool.description = llm_tools.get(
                 "selfie_tool_description",
                 "以你的形象生成图片。理解用户语义，在用户要求生成“有你出镜”的图片时（如自拍、合影、展示形象等）须调用此工具，区别于常规生图。此工具自带你的形象参考图。",
             )
-            guidance = self.conf.get(
+            guidance = llm_tools.get(
                 "selfie_prompt_guidance",
                 "按照用户要求，合理补充照片的细节，可选：服装、姿势、场景、神态。可用第一人称的“我”称呼自己。避免描述人物的身份、头部外貌，以防止和参考图矛盾。",
             )
@@ -270,7 +271,7 @@ class ImageGenerationPlugin(Star):
 
     def _personas_for_page(self) -> list[dict[str, Any]]:
         personas = []
-        for persona in self.conf.get("selfie_personas", []) or []:
+        for persona in self.conf.get("selfie", {}).get("selfie_personas", []) or []:
             if not isinstance(persona, dict):
                 continue
             page_persona = dict(persona)
@@ -290,7 +291,7 @@ class ImageGenerationPlugin(Star):
 
     def _allowed_persona_image_paths(self) -> set[Path]:
         allowed: set[Path] = set()
-        for persona in self.conf.get("selfie_personas", []) or []:
+        for persona in self.conf.get("selfie", {}).get("selfie_personas", []) or []:
             if not isinstance(persona, dict):
                 continue
             for path_str in self._normalize_str_list(persona.get("ref_images")):
@@ -353,23 +354,25 @@ class ImageGenerationPlugin(Star):
         page_prefs = self.history_cache.page_prefs.get("__default__", {})
         if not isinstance(page_prefs, dict):
             page_prefs = {}
+        cache_conf = self.conf.get("cache", {})
+        selfie_conf = self.conf.get("selfie", {})
         return {
             "pipeline": self.conf.get("api_pipeline", []) or [],
             "prompt_templates": self._prompt_templates_for_page(),
             "cache": {
-                "enabled": bool(self.conf.get("enable_image_cache", False)),
-                "max_mb": str(self.conf.get("image_cache_max_size_mb", "") or ""),
-                "max_hours": str(self.conf.get("image_cache_max_age_hours", "") or ""),
-                "max_count": str(self.conf.get("image_cache_max_count", "") or ""),
+                "enabled": bool(cache_conf.get("enable_image_cache", False)),
+                "max_mb": str(cache_conf.get("image_cache_max_size_mb", "") or ""),
+                "max_hours": str(cache_conf.get("image_cache_max_age_hours", "") or ""),
+                "max_count": str(cache_conf.get("image_cache_max_count", "") or ""),
             },
             "selfie": {
-                "binding_mode": self.conf.get("selfie_binding_mode", "优先 AstrBot persona"),
-                "manual_override": self.conf.get("selfie_persona_manual_override", ""),
-                "default_persona_id": self.conf.get("selfie_default_persona_id", ""),
-                "style_mode": self.conf.get("selfie_style_mode", "自动"),
-                "selected_style_id": self.conf.get("selfie_selected_style_id", ""),
+                "binding_mode": selfie_conf.get("selfie_binding_mode", "优先 AstrBot persona"),
+                "manual_override": selfie_conf.get("selfie_persona_manual_override", ""),
+                "default_persona_id": selfie_conf.get("selfie_default_persona_id", ""),
+                "style_mode": selfie_conf.get("selfie_style_mode", "自动"),
+                "selected_style_id": selfie_conf.get("selfie_selected_style_id", ""),
                 "personas": self._personas_for_page(),
-                "styles": self.conf.get("selfie_styles", []) or [],
+                "styles": selfie_conf.get("selfie_styles", []) or [],
             },
             "page_prefs": {
                 "theme": str(page_prefs.get("theme") or "system"),
@@ -382,6 +385,8 @@ class ImageGenerationPlugin(Star):
     async def page_get_config_bundle(self):
         username = web_request.username
         schema = self._load_conf_schema()
+        selfie_schema = schema.get("selfie", {})
+        selfie_items = selfie_schema.get("items", {}) if isinstance(selfie_schema, dict) else {}
         config_bundle = self._config_bundle_for_page()
         config_bundle["page_prefs"] = await self.history_cache.get_page_prefs(username)
         return jsonify(
@@ -390,8 +395,9 @@ class ImageGenerationPlugin(Star):
                 "config": config_bundle,
                 "schema": {
                     "api_pipeline": schema.get("api_pipeline", {}),
-                    "selfie_personas": schema.get("selfie_personas", {}),
-                    "selfie_styles": schema.get("selfie_styles", {}),
+                    "selfie": selfie_schema,
+                    "selfie_personas": selfie_items.get("selfie_personas", {}),
+                    "selfie_styles": selfie_items.get("selfie_styles", {}),
                 },
             }
         )
@@ -423,10 +429,11 @@ class ImageGenerationPlugin(Star):
         payload = await request.get_json(silent=True)
         if not isinstance(payload, dict):
             return jsonify({"success": False, "message": "请求体必须是 JSON 对象。"}), 400
-        self.conf["enable_image_cache"] = bool(payload.get("enabled", self.conf.get("enable_image_cache", False)))
-        self.conf["image_cache_max_size_mb"] = str(payload.get("max_mb") or "").strip()
-        self.conf["image_cache_max_age_hours"] = str(payload.get("max_hours") or "").strip()
-        self.conf["image_cache_max_count"] = str(payload.get("max_count") or "").strip()
+        cache_conf = self.conf.setdefault("cache", {})
+        cache_conf["enable_image_cache"] = bool(payload.get("enabled", cache_conf.get("enable_image_cache", False)))
+        cache_conf["image_cache_max_size_mb"] = str(payload.get("max_mb") or "").strip()
+        cache_conf["image_cache_max_age_hours"] = str(payload.get("max_hours") or "").strip()
+        cache_conf["image_cache_max_count"] = str(payload.get("max_count") or "").strip()
         await self.save_config_and_refresh_runtime()
         cleanup = await self.history_cache.enforce_limits(reason="config")
         return jsonify({"success": True, "message": "缓存配置已保存。", "cleanup": cleanup})
@@ -435,9 +442,10 @@ class ImageGenerationPlugin(Star):
         payload = await request.get_json(silent=True)
         if not isinstance(payload, dict):
             return jsonify({"success": False, "message": "请求体必须是 JSON 对象。"}), 400
-        self.conf["enable_image_cache"] = bool(payload.get("enabled", False))
+        cache_conf = self.conf.setdefault("cache", {})
+        cache_conf["enable_image_cache"] = bool(payload.get("enabled", False))
         await self.save_config_and_refresh_runtime()
-        return jsonify({"success": True, "enabled": bool(self.conf.get("enable_image_cache", False))})
+        return jsonify({"success": True, "enabled": bool(cache_conf.get("enable_image_cache", False))})
 
     async def page_get_history(self):
         records = await self.history_cache.get_history_for_page()
@@ -467,13 +475,14 @@ class ImageGenerationPlugin(Star):
         payload = await request.get_json(silent=True)
         if not isinstance(payload, dict):
             return jsonify({"success": False, "message": "请求体必须是 JSON 对象。"}), 400
-        self.conf["selfie_personas"] = self._normalize_personas(payload.get("personas"))
+        selfie_conf = self.conf.setdefault("selfie", {})
+        selfie_conf["selfie_personas"] = self._normalize_personas(payload.get("personas"))
         if "binding_mode" in payload:
-            self.conf["selfie_binding_mode"] = str(payload.get("binding_mode") or "优先 AstrBot persona")
+            selfie_conf["selfie_binding_mode"] = str(payload.get("binding_mode") or "优先 AstrBot persona")
         if "manual_override" in payload:
-            self.conf["selfie_persona_manual_override"] = str(payload.get("manual_override") or "")
+            selfie_conf["selfie_persona_manual_override"] = str(payload.get("manual_override") or "")
         if "default_persona_id" in payload:
-            self.conf["selfie_default_persona_id"] = str(payload.get("default_persona_id") or "")
+            selfie_conf["selfie_default_persona_id"] = str(payload.get("default_persona_id") or "")
         await self.save_config_and_refresh_runtime()
         return jsonify({"success": True, "message": "自拍人设已保存。"})
 
@@ -481,11 +490,12 @@ class ImageGenerationPlugin(Star):
         payload = await request.get_json(silent=True)
         if not isinstance(payload, dict):
             return jsonify({"success": False, "message": "请求体必须是 JSON 对象。"}), 400
-        self.conf["selfie_styles"] = self._normalize_styles(payload.get("styles"))
+        selfie_conf = self.conf.setdefault("selfie", {})
+        selfie_conf["selfie_styles"] = self._normalize_styles(payload.get("styles"))
         if "mode" in payload:
-            self.conf["selfie_style_mode"] = str(payload.get("mode") or "自动")
+            selfie_conf["selfie_style_mode"] = str(payload.get("mode") or "自动")
         if "selected_style_id" in payload:
-            self.conf["selfie_selected_style_id"] = str(payload.get("selected_style_id") or "")
+            selfie_conf["selfie_selected_style_id"] = str(payload.get("selected_style_id") or "")
         await self.save_config_and_refresh_runtime()
         return jsonify({"success": True, "message": "自拍风格已保存。"})
 
@@ -527,7 +537,8 @@ class ImageGenerationPlugin(Star):
         if not persona_id or not path_str:
             return jsonify({"success": False, "message": "缺少人设 ID 或图片路径。"}), 400
 
-        personas = list(self.conf.get("selfie_personas", []) or [])
+        selfie_conf = self.conf.setdefault("selfie", {})
+        personas = list(selfie_conf.get("selfie_personas", []) or [])
         removed = False
         for persona in personas:
             if not isinstance(persona, dict) or str(persona.get("id")) != persona_id:
@@ -546,7 +557,7 @@ class ImageGenerationPlugin(Star):
                     path.unlink()
                 except OSError as exc:
                     logger.warning(f"[FreeImage Pages] 删除自拍参考图文件失败: {path} - {exc}")
-            self.conf["selfie_personas"] = personas
+            selfie_conf["selfie_personas"] = personas
             await self.save_config_and_refresh_runtime()
         return jsonify({"success": True, "removed": removed})
 
@@ -790,7 +801,9 @@ class ImageGenerationPlugin(Star):
         if not display_name:
             display_name = prompt[:20] + "..." if len(prompt) > 20 else prompt
 
-        concise_mode = self.conf.get("concise_mode", False) and bool(group_id)
+        general_conf = self.conf.get("general", {})
+        quota_conf = self.conf.get("quota", {})
+        concise_mode = general_conf.get("concise_mode", False) and bool(group_id)
         start_msg = f"🎨 收到{'图生图' if is_i2i else '文生图'}请求，正在生成 [{display_name}]..."
         generation_mode = generation_mode or ("image2img" if is_i2i else "text2img")
 
@@ -822,9 +835,9 @@ class ImageGenerationPlugin(Star):
         available = count
         if count > 1 and not is_master:
             # 估算可用次数：用户余额 + 群余额（若启用群限制）
-            user_remain = self.persistence.get_user_count(sender_id) if self.conf.get("enable_user_limit", True) else 0
+            user_remain = self.persistence.get_user_count(sender_id) if quota_conf.get("enable_user_limit", True) else 0
             group_remain = 0
-            if self.conf.get("enable_group_limit", False) and group_id:
+            if quota_conf.get("enable_group_limit", False) and group_id:
                 group_remain = self.persistence.get_group_count(group_id)
             total_remain = user_remain + group_remain
             if total_remain < count:
@@ -942,11 +955,12 @@ class ImageGenerationPlugin(Star):
 
     def _build_quota_msg(self, group_id: str) -> str:
         """根据配额配置生成对应的配额不足提示。"""
-        if self.conf.get("enable_user_limit", True) and self.conf.get("enable_group_limit", False) and group_id:
+        quota_conf = self.conf.get("quota", {})
+        if quota_conf.get("enable_user_limit", True) and quota_conf.get("enable_group_limit", False) and group_id:
             return "❌ 本群和您的个人次数均已用完，请等待次日重置或向管理员索要。"
-        if self.conf.get("enable_user_limit", True):
+        if quota_conf.get("enable_user_limit", True):
             return "❌ 您的个人使用次数已用完，请等待次日重置或向管理员索要。"
-        if self.conf.get("enable_group_limit", False) and group_id:
+        if quota_conf.get("enable_group_limit", False) and group_id:
             return "❌ 本群的使用次数已用完，请等待次日重置或向管理员索要。"
         return "❌ 次数已用完。"
 
@@ -1052,11 +1066,12 @@ class ImageGenerationPlugin(Star):
             if is_master:
                 caption_parts.append("管理员剩余次数: ∞")
             else:
-                if self.conf.get("enable_user_limit", True):
+                quota_conf = self.conf.get("quota", {})
+                if quota_conf.get("enable_user_limit", True):
                     caption_parts.append(
                         f"个人剩余次数: {self.persistence.get_user_count(sender_id)}"
                     )
-                if self.conf.get("enable_group_limit", False) and group_id:
+                if quota_conf.get("enable_group_limit", False) and group_id:
                     caption_parts.append(
                         f"本群剩余次数: {self.persistence.get_group_count(group_id)}"
                     )
@@ -1198,7 +1213,9 @@ class ImageGenerationPlugin(Star):
         logger.info(f"[Selfie] 人设={persona_name}, 风格={style_name}, 参考图={len(images_to_send)}张")
 
         group_id = event.get_group_id()
-        concise = True if is_llm_tool else (self.conf.get("concise_mode", False) and bool(group_id))
+        general_conf = self.conf.get("general", {})
+        quota_conf = self.conf.get("quota", {})
+        concise = True if is_llm_tool else (general_conf.get("concise_mode", False) and bool(group_id))
 
         if not is_llm_tool and not concise:
             await self._send_plain_direct(event, f"📸 正在生成自拍 [{persona_name}]…")
@@ -1213,9 +1230,9 @@ class ImageGenerationPlugin(Star):
         sender_id = event.get_sender_id()
         available = count
         if count > 1 and not is_master:
-            user_remain = self.persistence.get_user_count(sender_id) if self.conf.get("enable_user_limit", True) else 0
+            user_remain = self.persistence.get_user_count(sender_id) if quota_conf.get("enable_user_limit", True) else 0
             group_remain = 0
-            if self.conf.get("enable_group_limit", False) and group_id:
+            if quota_conf.get("enable_group_limit", False) and group_id:
                 group_remain = self.persistence.get_group_count(group_id)
             total_remain = user_remain + group_remain
             if total_remain < count:
@@ -1317,9 +1334,9 @@ class ImageGenerationPlugin(Star):
                         remaining_str = "管理员剩余次数: ∞"
                     else:
                         parts_r = []
-                        if self.conf.get("enable_user_limit", True):
+                        if quota_conf.get("enable_user_limit", True):
                             parts_r.append(f"个人剩余次数: {self.persistence.get_user_count(event.get_sender_id())}")
-                        if self.conf.get("enable_group_limit", False) and group_id:
+                        if quota_conf.get("enable_group_limit", False) and group_id:
                             parts_r.append(f"本群剩余次数: {self.persistence.get_group_count(group_id)}")
                         remaining_str = " | ".join(parts_r) if parts_r else ""
                     caption_text = " | ".join(part for part in [
@@ -1429,7 +1446,7 @@ class ImageGenerationPlugin(Star):
         """以你的形象生成图片。理解用户语义，在用户要求生成“有你出镜”的图片时（如自拍、合影、展示形象等）须调用此工具，区别于常规生图。此工具自带你的形象参考图。
 
         Args:
-            action(string): 动作、场景、姿势、服装或情绪描述，例如"在咖啡店窗边喝拿铁"。
+            action(string): 按照用户要求，合理补充照片的细节，可选：服装、姿势、场景、神态。可用第一人称的“我”称呼自己。避免描述人物的身份、头部外貌，以防止和参考图矛盾。
             style_id(string): 可选。指定风格 ID 或名称，例如 cinematic、selfie_realistic。留空由插件自动选择。
             count(int): 生图数量（1~3），若不指定，默认为1。除非用户明确要求，否则跳过此参数。
         """
