@@ -8,7 +8,10 @@ const bridge = window.AstrBotPluginPage || {
 const CACHE_PAGE_SIZE_KEY = "freeimage.cache.pageSize";
 const HISTORY_PAGE_SIZE_KEY = "freeimage.history.pageSize";
 const LAST_TAB_KEY = "freeimage.lastTab";
-const PAGE_API_TIMEOUT_MS = 12000;
+const PAGE_API_TIMEOUT_MS = 25000;
+const PREVIEW_API_TIMEOUT_MS = 20000;
+const FULL_IMAGE_TIMEOUT_MS = 45000;
+const PREVIEW_CONCURRENCY = 3;
 const THEME_KEY = "freeimage.theme";
 const THEME_VALUES = new Set(["system", "light", "dark"]);
 const TAB_VALUES = new Set(["pipeline", "templates", "selfie", "history"]);
@@ -64,6 +67,13 @@ const state = {
   filteredHistory: [],
   historyPage: 1,
   historyPageSize: DEFAULT_HISTORY_PAGE_SIZE,
+  historyTotal: 0,
+  historyTotalPages: 1,
+  historyStats: null,
+  historyFacets: {
+    modes: [],
+    models: [],
+  },
   cache: {
     enabled: false,
     max_mb: "",
@@ -75,6 +85,7 @@ const state = {
   },
   cachePage: 1,
   cachePageSize: DEFAULT_CACHE_PAGE_SIZE,
+  cacheTotalPages: 1,
   pagePrefs: {
     theme: DEFAULT_THEME,
     cache_page_size: DEFAULT_CACHE_PAGE_SIZE,
@@ -253,33 +264,64 @@ function bindPreviewImageFailures(root = document) {
   });
 }
 
-function imageDataParams(item) {
+let previewQueueActive = 0;
+const previewQueue = [];
+let historyRequestSerial = 0;
+let cacheRequestSerial = 0;
+let historyFilterTimer = 0;
+
+function runQueuedPreview(task) {
+  return new Promise((resolve, reject) => {
+    previewQueue.push({ task, resolve, reject });
+    drainPreviewQueue();
+  });
+}
+
+function drainPreviewQueue() {
+  while (previewQueueActive < PREVIEW_CONCURRENCY && previewQueue.length) {
+    const job = previewQueue.shift();
+    previewQueueActive += 1;
+    Promise.resolve()
+      .then(job.task)
+      .then(job.resolve, job.reject)
+      .finally(() => {
+        previewQueueActive -= 1;
+        drainPreviewQueue();
+      });
+  }
+}
+
+function imageDataParams(item, { thumbnail = false } = {}) {
   if (!item) return null;
-  if (item.data_url) return null;
-  if (item.preview_kind === "persona" && item.path) return { persona_path: item.path };
-  if (item.path) return { persona_path: item.path };
-  if (item.id) return { cache_id: item.id };
+  if (thumbnail && item.thumb_data_url) return null;
+  if (!thumbnail && item.data_url) return null;
+  if (item.preview_kind === "persona" && item.path) return { persona_path: item.path, thumbnail: thumbnail ? 1 : 0 };
+  if (item.path) return { persona_path: item.path, thumbnail: thumbnail ? 1 : 0 };
+  if (item.id) return { cache_id: item.id, thumbnail: thumbnail ? 1 : 0 };
   return null;
 }
 
-async function ensureImageDataUrl(item) {
+async function ensureImageDataUrl(item, { thumbnail = false } = {}) {
   if (!item) return "";
-  if (item.data_url) return item.data_url;
-  const params = imageDataParams(item);
-  if (!params) return item.url || "";
+  if (thumbnail && item.thumb_data_url) return item.thumb_data_url;
+  if (!thumbnail && item.data_url) return item.data_url;
+  const params = imageDataParams(item, { thumbnail });
+  if (!params) return thumbnail ? "" : item.url || "";
   try {
     const result = await promiseWithTimeout(
       bridge.apiGet("get_image_data", params),
       "加载图片预览",
+      thumbnail ? PREVIEW_API_TIMEOUT_MS : FULL_IMAGE_TIMEOUT_MS,
     );
     if (result?.success !== false && result?.data_url) {
-      item.data_url = result.data_url;
-      return item.data_url;
+      if (thumbnail) item.thumb_data_url = result.data_url;
+      else item.data_url = result.data_url;
+      return result.data_url;
     }
   } catch (error) {
     console.warn("[FreeImage Pages] image preview load failed:", error);
   }
-  return item.url || "";
+  return thumbnail ? "" : item.url || "";
 }
 
 function resolvePreviewItem(card) {
@@ -304,7 +346,7 @@ function loadPreviewImages(root = document) {
     const item = resolvePreviewItem(card);
     if (!img || !item) return;
     card.dataset.previewLoading = "true";
-    void ensureImageDataUrl(item).then((src) => {
+    void runQueuedPreview(() => ensureImageDataUrl(item, { thumbnail: true })).then((src) => {
       if (src) {
         img.src = src;
         card.classList.remove("is-broken");
@@ -339,11 +381,11 @@ function setPageStatus(message = "", type = "info") {
   status.className = `page-status ${type}`;
 }
 
-function promiseWithTimeout(promise, label) {
+function promiseWithTimeout(promise, label, timeoutMs = PAGE_API_TIMEOUT_MS) {
   return Promise.race([
     promise,
     new Promise((_, reject) => {
-      window.setTimeout(() => reject(new Error(`${label}超时`)), PAGE_API_TIMEOUT_MS);
+      window.setTimeout(() => reject(new Error(`${label}超时`)), timeoutMs);
     }),
   ]);
 }
@@ -590,17 +632,22 @@ function clearDropMarkers(container) {
 
 function bindSortable(container, type) {
   if (!container) return;
-  container.querySelectorAll("[draggable='true']").forEach((item) => {
-    item.addEventListener("dragstart", (event) => {
-      dragState = { type, index: Number(item.dataset.index) };
-      item.classList.add("dragging");
-      event.dataTransfer.effectAllowed = "move";
-    });
-    item.addEventListener("dragend", () => {
-      item.classList.remove("dragging");
-      clearDropMarkers(container);
-      dragState = null;
-    });
+  container.querySelectorAll("[data-sort-id]").forEach((item) => {
+    const handle = item.querySelector("[data-drag-handle]");
+    if (handle) {
+      handle.draggable = true;
+      handle.addEventListener("dragstart", (event) => {
+        dragState = { type, index: Number(item.dataset.index) };
+        item.classList.add("dragging");
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", String(item.dataset.index));
+      });
+      handle.addEventListener("dragend", () => {
+        item.classList.remove("dragging");
+        clearDropMarkers(container);
+        dragState = null;
+      });
+    }
     item.addEventListener("dragover", (event) => {
       if (!dragState || dragState.type !== type) return;
       event.preventDefault();
@@ -658,9 +705,9 @@ function renderPipeline() {
       .map(([fieldKey, field]) => fieldHtml("pipeline", index, fieldKey, field, node[fieldKey] ?? defaultValueForField(field)))
       .join("");
     return `
-      <article class="node-card ${expanded ? "expanded" : ""}" data-index="${index}" data-sort-id="${sortIdForObject("pipeline", node)}" draggable="true">
+      <article class="node-card ${expanded ? "expanded" : ""}" data-index="${index}" data-sort-id="${sortIdForObject("pipeline", node)}">
         <div class="node-head">
-          <div class="node-title">
+          <div class="node-title" data-drag-handle>
             <span class="node-index">${index + 1}</span>
             <div class="title-text">
               <strong>${escapeHtml(meta.name || key)}</strong>
@@ -728,9 +775,9 @@ function renderPromptTemplates() {
   list.innerHTML = state.promptTemplates.map((item, index) => {
     const expanded = state.expandedTemplates.has(index);
     return `
-      <article class="template-card ${expanded ? "expanded" : ""}" data-index="${index}" data-sort-id="${sortIdForObject("template", item)}" draggable="true">
+      <article class="template-card ${expanded ? "expanded" : ""}" data-index="${index}" data-sort-id="${sortIdForObject("template", item)}">
         <div class="template-head">
-          <div class="template-title">
+          <div class="template-title" data-drag-handle>
             <span class="node-index">${index + 1}</span>
             <div class="title-text">
               <strong>${escapeHtml(item.trigger || "未命名模板")}</strong>
@@ -787,8 +834,12 @@ function updateHistoryFilters(records) {
   const modelSelect = byId("filter-model");
   const currentMode = modeSelect?.value || "";
   const currentModel = modelSelect?.value || "";
-  const modes = [...new Set(records.map((item) => item.mode).filter(Boolean))];
-  const models = [...new Set(records.map((item) => item.model).filter(Boolean))];
+  const modes = state.historyFacets.modes?.length
+    ? state.historyFacets.modes
+    : [...new Set(records.map((item) => item.mode).filter(Boolean))];
+  const models = state.historyFacets.models?.length
+    ? state.historyFacets.models
+    : [...new Set(records.map((item) => item.model).filter(Boolean))];
   if (modeSelect) {
     modeSelect.innerHTML = `<option value="">全部模式</option>${modes.map((mode) => `<option value="${escapeHtml(mode)}">${escapeHtml(modeLabel(mode))}</option>`).join("")}`;
     modeSelect.value = modes.includes(currentMode) ? currentMode : "";
@@ -800,22 +851,13 @@ function updateHistoryFilters(records) {
 }
 
 function applyHistoryFilters() {
-  const start = byId("filter-start")?.value || "";
-  const end = byId("filter-end")?.value || "";
-  const user = (byId("filter-user")?.value || "").trim();
-  const mode = byId("filter-mode")?.value || "";
-  const model = byId("filter-model")?.value || "";
-  state.filteredHistory = state.history.filter((record) => {
-    const date = getRecordDate(record).slice(0, 10);
-    if (start && date < start) return false;
-    if (end && date > end) return false;
-    if (user && !String(record.user_id || "").includes(user)) return false;
-    if (mode && record.mode !== mode) return false;
-    if (model && record.model !== model) return false;
-    return true;
-  });
   state.historyPage = 1;
-  renderHistory();
+  void loadHistory();
+}
+
+function scheduleHistoryFilter() {
+  window.clearTimeout(historyFilterTimer);
+  historyFilterTimer = window.setTimeout(applyHistoryFilters, 350);
 }
 
 function groupCounts(records, key) {
@@ -877,6 +919,16 @@ function historySlideItems(records) {
 }
 
 function renderMetrics(records) {
+  if (state.historyStats) {
+    const stats = state.historyStats;
+    if (byId("metric-total")) byId("metric-total").textContent = stats.total || 0;
+    if (byId("metric-today")) byId("metric-today").textContent = stats.today || 0;
+    if (byId("metric-avg")) byId("metric-avg").textContent = `${Number(stats.avg_elapsed || 0).toFixed(1)}s`;
+    if (byId("metric-users")) byId("metric-users").textContent = stats.users || 0;
+    renderBars("mode-bars", stats.mode_counts || [], modeLabel);
+    renderBars("model-bars", stats.model_counts || []);
+    return;
+  }
   const total = records.length;
   const today = new Date().toISOString().slice(0, 10);
   const todayCount = records.filter((item) => getRecordDate(item).slice(0, 10) === today).length;
@@ -891,16 +943,17 @@ function renderMetrics(records) {
 function renderHistory() {
   const records = state.filteredHistory;
   renderMetrics(records);
-  renderBars("mode-bars", groupCounts(records, "mode"), modeLabel);
-  renderBars("model-bars", groupCounts(records, "model"));
+  if (!state.historyStats) {
+    renderBars("mode-bars", groupCounts(records, "mode"), modeLabel);
+    renderBars("model-bars", groupCounts(records, "model"));
+  }
   const tbody = byId("history-body");
   if (!tbody) return;
   const sizeSelect = byId("history-page-size");
   if (sizeSelect) sizeSelect.value = String(normalizeHistoryPageSize(state.historyPageSize));
-  const totalPages = Math.max(1, Math.ceil(records.length / state.historyPageSize));
+  const totalPages = Math.max(1, Number(state.historyTotalPages || 1));
   state.historyPage = Math.min(Math.max(1, state.historyPage), totalPages);
-  const start = (state.historyPage - 1) * state.historyPageSize;
-  const pageRecords = records.slice(start, start + state.historyPageSize);
+  const pageRecords = records;
   byId("history-page-label").textContent = `${state.historyPage} / ${totalPages}`;
   byId("history-prev").disabled = state.historyPage <= 1;
   byId("history-next").disabled = state.historyPage >= totalPages;
@@ -909,7 +962,7 @@ function renderHistory() {
     return;
   }
   tbody.innerHTML = pageRecords.map((record, offset) => {
-    const index = start + offset;
+    const index = offset;
     const hasImages = Array.isArray(record.cache_items) && record.cache_items.length > 0;
     return `
       <tr>
@@ -934,12 +987,37 @@ function renderHistory() {
   }).join("");
 }
 
+function historyQueryParams() {
+  return {
+    page: state.historyPage,
+    page_size: state.historyPageSize,
+    start: byId("filter-start")?.value || "",
+    end: byId("filter-end")?.value || "",
+    user: (byId("filter-user")?.value || "").trim(),
+    mode: byId("filter-mode")?.value || "",
+    model: byId("filter-model")?.value || "",
+  };
+}
+
 async function loadHistory() {
   setPageStatus("正在加载生图统计...");
-  const result = await callApi("加载生图统计", () => bridge.apiGet("get_history"));
+  const requestId = ++historyRequestSerial;
+  const result = await callApi("加载生图统计", () => bridge.apiGet("get_history", historyQueryParams()));
+  if (requestId !== historyRequestSerial) return;
+  if (result?.success === false) return;
   state.history = Array.isArray(result.records) ? result.records : [];
+  state.filteredHistory = state.history;
+  state.historyPage = Number(result.page || state.historyPage || 1);
+  state.historyPageSize = normalizeHistoryPageSize(result.page_size || state.historyPageSize);
+  state.historyTotal = Number(result.total_count || state.history.length || 0);
+  state.historyTotalPages = Number(result.total_pages || 1);
+  state.historyStats = result.stats || null;
+  state.historyFacets = {
+    modes: Array.isArray(result.facets?.modes) ? result.facets.modes : [],
+    models: Array.isArray(result.facets?.models) ? result.facets.models : [],
+  };
   updateHistoryFilters(state.history);
-  applyHistoryFilters();
+  renderHistory();
   setPageStatus();
 }
 
@@ -959,10 +1037,9 @@ function renderCacheGrid() {
   const grid = byId("cache-grid");
   if (!grid) return;
   const images = state.cache.images || [];
-  const totalPages = Math.max(1, Math.ceil(images.length / state.cachePageSize));
+  const totalPages = Math.max(1, Number(state.cacheTotalPages || 1));
   state.cachePage = Math.min(Math.max(1, state.cachePage), totalPages);
-  const start = (state.cachePage - 1) * state.cachePageSize;
-  const pageItems = images.slice(start, start + state.cachePageSize);
+  const pageItems = images;
   byId("cache-page-label").textContent = `${state.cachePage} / ${totalPages}`;
   byId("cache-prev").disabled = state.cachePage <= 1;
   byId("cache-next").disabled = state.cachePage >= totalPages;
@@ -970,23 +1047,34 @@ function renderCacheGrid() {
     grid.innerHTML = `<div class="empty">当前没有已保存的缓存图片。</div>`;
     return;
   }
-  grid.innerHTML = pageItems.map((image, offset) => `
+  grid.innerHTML = pageItems.map((image, offset) => {
+    const displayIndex = (state.cachePage - 1) * state.cachePageSize + offset + 1;
+    return `
     <figure class="image-tile" data-preview-card data-preview-kind="cache" data-cache-id="${attrHtml(image.id || "")}" title="${attrHtml(image.prompt || "")}">
-      <button class="image-preview" data-action="cache-slide" data-index="${start + offset}" type="button" aria-label="浏览缓存图片 ${start + offset + 1}">
-        <img alt="缓存图片 ${start + offset + 1}" loading="lazy" />
+      <button class="image-preview" data-action="cache-slide" data-index="${offset}" type="button" aria-label="浏览缓存图片 ${displayIndex}">
+        <img alt="缓存图片 ${displayIndex}" loading="lazy" />
         <span class="preview-placeholder">图片未加载成功</span>
         <span class="image-tile-label">${escapeHtml(image.display_name || modeLabel(image.mode))}</span>
       </button>
       <button class="thumb-action" data-action="cache-image-delete" data-cache-id="${attrHtml(image.id || "")}" type="button" title="删除缓存图片" aria-label="删除缓存图片">×</button>
     </figure>
-  `).join("");
+  `;
+  }).join("");
   loadPreviewImages(grid);
 }
 
 async function loadCache() {
   setPageStatus("正在加载缓存...");
-  const result = await callApi("加载缓存", () => bridge.apiGet("get_cache"));
+  const requestId = ++cacheRequestSerial;
+  const result = await callApi("加载缓存", () => bridge.apiGet("get_cache", {
+    page: state.cachePage,
+    page_size: state.cachePageSize,
+  }));
+  if (requestId !== cacheRequestSerial) return;
   if (result?.success === false) return;
+  state.cachePage = Number(result.page || state.cachePage || 1);
+  state.cachePageSize = normalizeCachePageSize(result.page_size || state.cachePageSize);
+  state.cacheTotalPages = Number(result.total_pages || 1);
   state.cache = {
     ...state.cache,
     enabled: Boolean(result.enabled),
@@ -1408,17 +1496,7 @@ async function deleteCacheImage(cacheId) {
     cache_id: image.id,
   }));
   if (result?.success === false) return;
-  state.cache = {
-    ...state.cache,
-    enabled: Boolean(result.enabled),
-    max_mb: result.max_mb || state.cache.max_mb || "",
-    max_hours: result.max_hours || state.cache.max_hours || "",
-    max_count: result.max_count || state.cache.max_count || "",
-    total_count: Number(result.total_count || 0),
-    total_bytes: Number(result.total_bytes || 0),
-    images: Array.isArray(result.images) ? result.images : [],
-  };
-  renderCacheGrid();
+  await loadCache();
   await loadHistory();
   showToast("缓存图片已删除。");
 }
@@ -1567,35 +1645,35 @@ function bindEvents() {
   byId("save-cache-config")?.addEventListener("click", (event) => saveCacheConfig(event.currentTarget));
   byId("clear-cache")?.addEventListener("click", (event) => clearCache(event.currentTarget));
   byId("cache-prev")?.addEventListener("click", () => {
-    state.cachePage -= 1;
-    renderCacheGrid();
+    state.cachePage = Math.max(1, state.cachePage - 1);
+    void loadCache();
   });
   byId("cache-next")?.addEventListener("click", () => {
     state.cachePage += 1;
-    renderCacheGrid();
+    void loadCache();
   });
   byId("cache-page-size")?.addEventListener("change", (event) => {
     state.cachePageSize = normalizeCachePageSize(event.target.value);
     state.pagePrefs.cache_page_size = state.cachePageSize;
     safeStorageSet(CACHE_PAGE_SIZE_KEY, state.cachePageSize);
     state.cachePage = 1;
-    renderCacheGrid();
+    void loadCache();
     void persistPagePrefs({ cache_page_size: state.cachePageSize });
   });
   byId("history-prev")?.addEventListener("click", () => {
-    state.historyPage -= 1;
-    renderHistory();
+    state.historyPage = Math.max(1, state.historyPage - 1);
+    void loadHistory();
   });
   byId("history-next")?.addEventListener("click", () => {
     state.historyPage += 1;
-    renderHistory();
+    void loadHistory();
   });
   byId("history-page-size")?.addEventListener("change", (event) => {
     state.historyPageSize = normalizeHistoryPageSize(event.target.value);
     state.pagePrefs.history_page_size = state.historyPageSize;
     safeStorageSet(HISTORY_PAGE_SIZE_KEY, state.historyPageSize);
     state.historyPage = 1;
-    renderHistory();
+    void loadHistory();
     void persistPagePrefs({ history_page_size: state.historyPageSize });
   });
   byId("add-persona")?.addEventListener("click", () => {
@@ -1808,7 +1886,7 @@ function bindEvents() {
     if (["filter-start", "filter-end", "filter-mode", "filter-model"].includes(event.target.id)) applyHistoryFilters();
   });
 
-  byId("filter-user")?.addEventListener("input", applyHistoryFilters);
+  byId("filter-user")?.addEventListener("input", scheduleHistoryFilter);
 
   document.body.addEventListener("click", (event) => {
     if (event.target.closest("#persona-upload-zone")) byId("persona-upload-input")?.click();

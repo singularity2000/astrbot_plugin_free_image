@@ -574,19 +574,6 @@ class CommandHandlers:
         action = p._strip_command_prefix(
             p._get_plain_message_text(event, strip_wake_prefix=True), "自拍"
         ).strip()
-        if p.conf.get("general", {}).get("concise_mode", False) and bool(event.get_group_id()):
-            try:
-                bot = getattr(event, "bot", None)
-                if not bot:
-                    provider = p.context.get_using_provider(event.unified_msg_origin)
-                    if provider and hasattr(provider, "bot"):
-                        bot = provider.bot
-                if bot and hasattr(bot, "set_msg_emoji_like"):
-                    await bot.set_msg_emoji_like(
-                        message_id=event.message_obj.message_id, emoji_id=66, set=True
-                    )
-            except Exception as e:
-                logger.debug(f"[#自拍] 贴表情失败: {e}")
         _ = await p._exec_selfie(event, action, is_llm_tool=False)
         event.stop_event()
         return

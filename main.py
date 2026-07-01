@@ -1,5 +1,6 @@
 import asyncio
 import base64
+from io import BytesIO
 import json
 import mimetypes
 import re
@@ -324,15 +325,44 @@ class ImageGenerationPlugin(Star):
                 return path
         return None
 
-    async def _image_data_url_payload(self, path: Path) -> dict[str, Any]:
-        image_bytes = await asyncio.to_thread(path.read_bytes)
-        mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
+    @staticmethod
+    def _page_query_int(key: str, default: int, *, minimum: int = 1, maximum: int = 100) -> int:
+        try:
+            value = int(request.args.get(key, default))
+        except (TypeError, ValueError):
+            value = default
+        return max(minimum, min(maximum, value))
+
+    @staticmethod
+    def _thumbnail_image_bytes(path: Path, max_side: int = 360) -> tuple[bytes, str]:
+        from PIL import Image as PILImage
+
+        with PILImage.open(path) as image:
+            image.thumbnail((max_side, max_side))
+            if image.mode not in ("RGB", "RGBA"):
+                image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+            buffer = BytesIO()
+            image.save(buffer, format="WEBP", quality=72, method=4)
+            return buffer.getvalue(), "image/webp"
+
+    async def _image_data_url_payload(self, path: Path, *, thumbnail: bool = False) -> dict[str, Any]:
+        if thumbnail:
+            try:
+                image_bytes, mime_type = await asyncio.to_thread(self._thumbnail_image_bytes, path)
+            except Exception as exc:
+                logger.warning(f"[FreeImage Pages] 生成缩略图失败，回退原图: {path} - {exc}")
+                image_bytes = await asyncio.to_thread(path.read_bytes)
+                mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
+        else:
+            image_bytes = await asyncio.to_thread(path.read_bytes)
+            mime_type = mimetypes.guess_type(str(path))[0] or "image/png"
         encoded = base64.b64encode(image_bytes).decode("ascii")
         return {
             "success": True,
             "data_url": f"data:{mime_type};base64,{encoded}",
             "mime_type": mime_type,
             "size_bytes": len(image_bytes),
+            "thumbnail": thumbnail,
         }
 
     def _is_managed_selfie_path(self, path: Path) -> bool:
@@ -448,11 +478,25 @@ class ImageGenerationPlugin(Star):
         return jsonify({"success": True, "enabled": bool(cache_conf.get("enable_image_cache", False))})
 
     async def page_get_history(self):
-        records = await self.history_cache.get_history_for_page()
-        return jsonify({"success": True, "records": records})
+        filters = {
+            "start": request.args.get("start", ""),
+            "end": request.args.get("end", ""),
+            "user": request.args.get("user", ""),
+            "mode": request.args.get("mode", ""),
+            "model": request.args.get("model", ""),
+        }
+        result = await self.history_cache.get_history_for_page(
+            page=self._page_query_int("page", 1),
+            page_size=self._page_query_int("page_size", 20),
+            filters=filters,
+        )
+        return jsonify({"success": True, **result})
 
     async def page_get_cache(self):
-        cache = await self.history_cache.get_cache_for_page()
+        cache = await self.history_cache.get_cache_for_page(
+            page=self._page_query_int("page", 1),
+            page_size=self._page_query_int("page_size", 24),
+        )
         return jsonify({"success": True, **cache})
 
     async def page_clear_cache(self):
@@ -575,12 +619,13 @@ class ImageGenerationPlugin(Star):
     async def page_get_image_data(self):
         cache_id = str(request.args.get("cache_id", "")).strip()
         persona_path = str(request.args.get("persona_path", "")).strip()
+        thumbnail = str(request.args.get("thumbnail", "")).strip().lower() in {"1", "true", "yes"}
         if not cache_id and not persona_path:
             return jsonify({"success": False, "message": "缺少图片参数。"}), 400
         path = self._resolve_page_image_path(cache_id=cache_id, persona_path=persona_path)
         if not path:
             return jsonify({"success": False, "message": "图片不存在或未被配置。"}), 404
-        return jsonify(await self._image_data_url_payload(path))
+        return jsonify(await self._image_data_url_payload(path, thumbnail=thumbnail))
 
     def _strip_wake_prefix(self, text: str) -> str:
         wake_prefixes = self.context.get_config().get("wake_prefix", [])
@@ -692,6 +737,22 @@ class ImageGenerationPlugin(Star):
         if with_reply:
             chain.insert(0, Reply(id=event.message_obj.message_id))
         await event.send(MessageChain(chain=chain))
+
+    async def _try_set_msg_emoji_like(
+        self, event: AstrMessageEvent, emoji_id: int, log_prefix: str
+    ) -> None:
+        try:
+            bot = getattr(event, "bot", None)
+            if not bot:
+                provider = self.context.get_using_provider(event.unified_msg_origin)
+                if provider and hasattr(provider, "bot"):
+                    bot = provider.bot
+            if bot and hasattr(bot, "set_msg_emoji_like"):
+                await bot.set_msg_emoji_like(
+                    message_id=event.message_obj.message_id, emoji_id=emoji_id, set=True
+                )
+        except Exception as e:
+            logger.debug(f"{log_prefix}贴表情失败: {e}")
 
     async def _send_with_auto_quote(
         self,
@@ -1175,6 +1236,14 @@ class ImageGenerationPlugin(Star):
         model_index: Optional[int] = None,
     ) -> str:
         """执行自拍生图，返回状态字符串。图片通过 event.send 直接发送。"""
+        group_id = event.get_group_id()
+        general_conf = self.conf.get("general", {})
+        quota_conf = self.conf.get("quota", {})
+        concise = True if is_llm_tool else (general_conf.get("concise_mode", False) and bool(group_id))
+
+        if not is_llm_tool and concise:
+            await self._try_set_msg_emoji_like(event, 66, "[#自拍] ")
+
         if not self.pipeline or not self.sender or not self.usage_guard:
             return "自拍失败，原因：插件尚未完成初始化。"
 
@@ -1211,11 +1280,6 @@ class ImageGenerationPlugin(Star):
         persona_name = persona.get("name", persona.get("id", ""))
         style_name = style.get("name", "") if style else "无风格"
         logger.info(f"[Selfie] 人设={persona_name}, 风格={style_name}, 参考图={len(images_to_send)}张")
-
-        group_id = event.get_group_id()
-        general_conf = self.conf.get("general", {})
-        quota_conf = self.conf.get("quota", {})
-        concise = True if is_llm_tool else (general_conf.get("concise_mode", False) and bool(group_id))
 
         if not is_llm_tool and not concise:
             await self._send_plain_direct(event, f"📸 正在生成自拍 [{persona_name}]…")

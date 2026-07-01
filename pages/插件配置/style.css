@@ -433,7 +433,6 @@ label {
 .node-card,
 .template-card {
   position: relative;
-  cursor: grab;
   transition:
     transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1),
     border-color 0.18s ease,
@@ -443,7 +442,6 @@ label {
 
 .node-card.dragging,
 .template-card.dragging {
-  cursor: grabbing;
   opacity: 0.55;
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.22);
 }
@@ -506,6 +504,16 @@ label {
   align-items: center;
   gap: 10px;
   min-width: 0;
+}
+
+.node-title[data-drag-handle],
+.template-title[data-drag-handle] {
+  cursor: grab;
+}
+
+.node-card.dragging .node-title[data-drag-handle],
+.template-card.dragging .template-title[data-drag-handle] {
+  cursor: grabbing;
 }
 
 .node-index {

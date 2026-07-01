@@ -171,12 +171,24 @@ class ImageHistoryCache:
                 )
             return result
 
-    async def get_history_for_page(self) -> list[dict[str, Any]]:
+    async def get_history_for_page(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        filters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         async with self._lock:
             self._sync_cache_existence()
             cache_by_id = {item.get("id"): item for item in self.cache_images}
+            all_records = [dict(record) for record in reversed(self.records)]
+            filtered_records = self._filter_history_records(all_records, filters or {})
+            total_count = len(filtered_records)
+            page, page_size, total_pages, start, end = self._page_window(
+                page, page_size, total_count
+            )
             records: list[dict[str, Any]] = []
-            for record in reversed(self.records):
+            for record in filtered_records[start:end]:
                 page_record = dict(record)
                 cache_items = []
                 for cache_id in record.get("cache_ids") or []:
@@ -189,29 +201,137 @@ class ImageHistoryCache:
                 page_record["cache_items"] = cache_items
                 page_record["has_local_image"] = bool(cache_items)
                 records.append(page_record)
-            return records
+            return {
+                "records": records,
+                "page": page,
+                "page_size": page_size,
+                "total_pages": total_pages,
+                "total_count": total_count,
+                "stats": self._history_stats(filtered_records),
+                "facets": self._history_facets(all_records),
+            }
 
-    async def get_cache_for_page(self) -> dict[str, Any]:
+    async def get_cache_for_page(
+        self, *, page: int = 1, page_size: int = 24
+    ) -> dict[str, Any]:
         async with self._lock:
             self._sync_cache_existence()
-            images = [
+            images_all = [
                 page_item
                 for item in reversed(self.cache_images)
                 if (page_item := self._cache_entry_for_page(item))
             ]
+            total_count = len(images_all)
+            page, page_size, total_pages, start, end = self._page_window(
+                page, page_size, total_count
+            )
             return {
                 "enabled": self.cache_enabled(),
                 "max_mb": self._raw_limit("image_cache_max_size_mb"),
                 "max_hours": self._raw_limit("image_cache_max_age_hours"),
                 "max_count": self._raw_limit("image_cache_max_count"),
-                "total_count": len(images),
+                "page": page,
+                "page_size": page_size,
+                "total_pages": total_pages,
+                "total_count": total_count,
                 "total_bytes": sum(int(item.get("size_bytes") or 0) for item in self.cache_images),
-                "images": images,
+                "images": images_all[start:end],
             }
 
     async def get_page_prefs(self, username: str | None = None) -> dict[str, Any]:
         async with self._lock:
             return dict(self._prefs_for_user(username))
+
+    @staticmethod
+    def _page_window(
+        page: int, page_size: int, total_count: int
+    ) -> tuple[int, int, int, int, int]:
+        try:
+            page = int(page)
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            page_size = int(page_size)
+        except (TypeError, ValueError):
+            page_size = 20
+        page = max(1, page)
+        page_size = max(1, min(100, page_size))
+        total_pages = max(1, (max(0, total_count) + page_size - 1) // page_size)
+        page = min(page, total_pages)
+        start = (page - 1) * page_size
+        end = start + page_size
+        return page, page_size, total_pages, start, end
+
+    @staticmethod
+    def _history_record_date(record: dict[str, Any]) -> str:
+        return str(record.get("created_at") or record.get("time") or "")[:10]
+
+    def _filter_history_records(
+        self, records: list[dict[str, Any]], filters: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        start = str(filters.get("start") or "").strip()
+        end = str(filters.get("end") or "").strip()
+        user = str(filters.get("user") or "").strip()
+        mode = str(filters.get("mode") or "").strip()
+        model = str(filters.get("model") or "").strip()
+
+        result: list[dict[str, Any]] = []
+        for record in records:
+            date = self._history_record_date(record)
+            if start and date < start:
+                continue
+            if end and date > end:
+                continue
+            if user and user not in str(record.get("user_id") or ""):
+                continue
+            if mode and str(record.get("mode") or "") != mode:
+                continue
+            if model and str(record.get("model") or "") != model:
+                continue
+            result.append(record)
+        return result
+
+    @staticmethod
+    def _top_counts(records: list[dict[str, Any]], key: str, limit: int = 8) -> list[list[Any]]:
+        counts: dict[str, int] = {}
+        for record in records:
+            value = str(record.get(key) or "")
+            if not value:
+                continue
+            counts[value] = counts.get(value, 0) + 1
+        return [
+            [value, count]
+            for value, count in sorted(counts.items(), key=lambda item: item[1], reverse=True)[:limit]
+        ]
+
+    def _history_stats(self, records: list[dict[str, Any]]) -> dict[str, Any]:
+        today = datetime.now().date().isoformat()
+        elapsed_values = []
+        users = set()
+        for record in records:
+            try:
+                elapsed_values.append(float(record.get("elapsed") or 0))
+            except (TypeError, ValueError):
+                pass
+            user_id = str(record.get("user_id") or "")
+            if user_id:
+                users.add(user_id)
+        return {
+            "total": len(records),
+            "today": sum(1 for record in records if self._history_record_date(record) == today),
+            "avg_elapsed": round(sum(elapsed_values) / len(elapsed_values), 3)
+            if elapsed_values
+            else 0,
+            "users": len(users),
+            "mode_counts": self._top_counts(records, "mode"),
+            "model_counts": self._top_counts(records, "model"),
+        }
+
+    @staticmethod
+    def _history_facets(records: list[dict[str, Any]]) -> dict[str, list[str]]:
+        modes = sorted({str(item.get("mode") or "") for item in records if item.get("mode")})
+        models = sorted({str(item.get("model") or "") for item in records if item.get("model")})
+        return {"modes": modes, "models": models}
 
     async def save_page_prefs(
         self, updates: dict[str, Any], username: str | None = None
