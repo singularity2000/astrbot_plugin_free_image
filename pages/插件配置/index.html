@@ -41,6 +41,10 @@
             <button data-theme-choice="dark" type="button">暗色</button>
           </div>
         </div>
+        <div class="sidebar-save" aria-label="配置保存">
+          <button class="btn primary" id="save-all-config" type="button" disabled>保存改动</button>
+          <small id="dirty-summary">未修改</small>
+        </div>
       </aside>
 
       <main class="main">
@@ -54,7 +58,6 @@
             </div>
             <div class="toolbar">
               <button class="btn" id="add-pipeline" type="button">+ 添加节点</button>
-              <button class="btn primary" id="save-pipeline" type="button">保存管线</button>
             </div>
           </div>
           <div class="rail-board">
@@ -72,7 +75,6 @@
             </div>
             <div class="toolbar">
               <button class="btn" id="add-template" type="button">+ 添加模板</button>
-              <button class="btn primary" id="save-templates" type="button">保存模板</button>
             </div>
           </div>
           <div id="template-list" class="template-grid"></div>
@@ -86,7 +88,6 @@
             </div>
             <div class="toolbar">
               <button class="btn" id="add-persona" type="button">+ 添加人设</button>
-              <button class="btn primary" id="save-personas" type="button">保存人设</button>
             </div>
           </div>
           <div class="selfie-layout">
@@ -100,7 +101,6 @@
             </div>
             <div class="toolbar">
               <button class="btn" id="add-style" type="button">+ 添加风格</button>
-              <button class="btn primary" id="save-styles" type="button">保存风格</button>
             </div>
           </div>
           <div class="style-controls">
@@ -142,7 +142,7 @@
           <div class="filter-bar">
             <input id="filter-start" type="date" />
             <input id="filter-end" type="date" />
-            <input id="filter-user" type="search" placeholder="触发人" />
+            <select id="filter-user"></select>
             <select id="filter-mode"></select>
             <select id="filter-model"></select>
             <label class="page-size-control">每页
@@ -195,7 +195,6 @@
             <label>最大 MB<input id="cache-max-mb" type="number" min="0" step="1" /></label>
             <label>最长小时<input id="cache-max-hours" type="number" min="0" step="1" /></label>
             <label>最多张数<input id="cache-max-count" type="number" min="0" step="1" /></label>
-            <button class="btn primary" id="save-cache-config" type="button">保存限制</button>
           </div>
           <div class="cache-strip">
             <div><strong id="cache-total">0</strong><span>张图片</span></div>

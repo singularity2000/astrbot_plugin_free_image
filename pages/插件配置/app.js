@@ -73,6 +73,7 @@ const state = {
   historyFacets: {
     modes: [],
     models: [],
+    users: [],
   },
   cache: {
     enabled: false,
@@ -108,9 +109,67 @@ const state = {
   slideIndex: 0,
   expandedPipeline: new Set(),
   expandedTemplates: new Set(),
+  dirtySections: new Set(),
+  savedSnapshot: {},
+  savingConfig: false,
 };
 
 const byId = (id) => document.getElementById(id);
+const DIRTY_LABELS = {
+  pipeline: "管线",
+  templates: "模板",
+  cache: "缓存",
+  personas: "自拍人设",
+  styles: "自拍风格",
+};
+
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+function sectionSnapshot(section) {
+  return stableStringify(sectionPayload(section));
+}
+
+function recomputeDirtySections() {
+  const sections = Object.keys(DIRTY_LABELS);
+  state.dirtySections = new Set(sections.filter((section) => (state.savedSnapshot[section] || "") !== sectionSnapshot(section)));
+  refreshDirtySummary();
+}
+
+function refreshDirtySummary() {
+  const button = byId("save-all-config");
+  const summary = byId("dirty-summary");
+  const sections = [...state.dirtySections];
+  const hasDirty = sections.length > 0;
+  if (button) {
+    button.disabled = !hasDirty || state.savingConfig;
+    button.textContent = state.savingConfig ? "保存中..." : "保存改动";
+  }
+  if (summary) {
+    summary.textContent = hasDirty
+      ? `已修改：${sections.map((section) => DIRTY_LABELS[section] || section).join("、")}`
+      : "已保存，当前无更改";
+    summary.classList.toggle("dirty", hasDirty);
+  }
+}
+
+function markDirty(section) {
+  if (!section) return;
+  recomputeDirtySections();
+}
+
+function clearDirty(sections = null) {
+  const targets = sections || Object.keys(DIRTY_LABELS);
+  targets.forEach((section) => {
+    state.savedSnapshot[section] = sectionSnapshot(section);
+  });
+  recomputeDirtySections();
+}
 
 function getThemeValue() {
   const stateTheme = String(state.pagePrefs?.theme || "").trim().toLowerCase();
@@ -566,9 +625,13 @@ function updateBoundValue(input) {
     input.classList.remove("input-error");
   }
 
-  if (section === "pipeline" && state.pipeline[index]) state.pipeline[index][key] = value;
+  if (section === "pipeline" && state.pipeline[index]) {
+    state.pipeline[index][key] = value;
+    markDirty("pipeline");
+  }
   if (section === "style" && state.selfie.styles[index]) {
     state.selfie.styles[index][key] = value;
+    markDirty("styles");
     if (["id", "name", "keywords", "enabled"].includes(key)) renderStyleList();
   }
 }
@@ -668,11 +731,13 @@ function bindSortable(container, type) {
         reorderWithAnimation(container, () => {
           moveItem(state.pipeline, dragState.index, to, state.expandedPipeline);
         }, renderPipeline);
+        markDirty("pipeline");
       }
       if (type === "template") {
         reorderWithAnimation(container, () => {
           moveItem(state.promptTemplates, dragState.index, to, state.expandedTemplates);
         }, renderPromptTemplates);
+        markDirty("templates");
       }
     });
   });
@@ -765,6 +830,123 @@ async function savePipeline(button) {
   if (result?.success !== false) showToast("管线已保存，运行时已刷新。");
 }
 
+function normalizedPromptTemplatesPayload() {
+  return state.promptTemplates
+    .map((item) => ({ trigger: String(item.trigger || "").trim(), prompt: String(item.prompt || "").trim() }))
+    .filter((item) => item.trigger && item.prompt);
+}
+
+function updateCacheConfigFromControls() {
+  if (byId("cache-enabled")) state.cache.enabled = byId("cache-enabled").checked;
+  if (byId("cache-max-mb")) state.cache.max_mb = byId("cache-max-mb").value.trim();
+  if (byId("cache-max-hours")) state.cache.max_hours = byId("cache-max-hours").value.trim();
+  if (byId("cache-max-count")) state.cache.max_count = byId("cache-max-count").value.trim();
+}
+
+function personasPayload() {
+  updateSelfieControlsFromEditor();
+  return state.selfie.personas.map((persona) => ({
+    __template_key: "selfie_persona",
+    id: persona.id,
+    name: persona.name,
+    description: persona.description,
+    ref_images: persona.ref_images,
+    bound_sids: persona.bound_sids || [],
+    bound_astrbot_personas: persona.bound_astrbot_personas || [],
+  }));
+}
+
+function stylesPayload() {
+  state.selfie.style_mode = byId("style-mode")?.value || state.selfie.style_mode || "自动";
+  state.selfie.selected_style_id = byId("style-selected-id")?.value || "";
+  return state.selfie.styles.map((style) => ({
+    __template_key: "selfie_style",
+    id: style.id,
+    name: style.name,
+    prompt: style.prompt,
+    keywords: style.keywords || [],
+    enabled: style.enabled !== false,
+  }));
+}
+
+function sectionPayload(section) {
+  if (section === "pipeline") return deepClone(state.pipeline);
+  if (section === "templates") return normalizedPromptTemplatesPayload();
+  if (section === "cache") {
+    updateCacheConfigFromControls();
+    return {
+      enabled: Boolean(state.cache.enabled),
+      max_mb: String(state.cache.max_mb || ""),
+      max_hours: String(state.cache.max_hours || ""),
+      max_count: String(state.cache.max_count || ""),
+    };
+  }
+  if (section === "personas") {
+    return {
+      binding_mode: state.selfie.binding_mode,
+      manual_override: state.selfie.manual_override,
+      default_persona_id: state.selfie.default_persona_id,
+      personas: personasPayload(),
+    };
+  }
+  if (section === "styles") {
+    return {
+      style_mode: state.selfie.style_mode,
+      selected_style_id: state.selfie.selected_style_id,
+      styles: stylesPayload(),
+    };
+  }
+  return null;
+}
+
+async function saveAllConfig(button) {
+  if (!state.dirtySections.size || state.savingConfig) return;
+  const sections = [...state.dirtySections];
+  const payload = {};
+  if (state.dirtySections.has("pipeline")) payload.pipeline = state.pipeline;
+  if (state.dirtySections.has("templates")) payload.prompt_templates = normalizedPromptTemplatesPayload();
+  if (state.dirtySections.has("cache")) {
+    updateCacheConfigFromControls();
+    payload.cache = {
+      enabled: Boolean(state.cache.enabled),
+      max_mb: state.cache.max_mb || "",
+      max_hours: state.cache.max_hours || "",
+      max_count: state.cache.max_count || "",
+    };
+  }
+  if (state.dirtySections.has("personas") || state.dirtySections.has("styles")) {
+    payload.selfie = {};
+    if (state.dirtySections.has("personas")) {
+      payload.selfie.binding_mode = state.selfie.binding_mode;
+      payload.selfie.manual_override = state.selfie.manual_override;
+      payload.selfie.default_persona_id = state.selfie.default_persona_id;
+      payload.selfie.personas = personasPayload();
+    }
+    if (state.dirtySections.has("styles")) {
+      payload.selfie.style_mode = state.selfie.style_mode;
+      payload.selfie.selected_style_id = state.selfie.selected_style_id;
+      payload.selfie.styles = stylesPayload();
+    }
+  }
+
+  state.savingConfig = true;
+  setBusy(button, true, "保存中...");
+  refreshDirtySummary();
+  const result = await callApi("保存配置", () => bridge.apiPost("save_config_bundle", payload));
+  state.savingConfig = false;
+  setBusy(button, false);
+  if (result?.success !== false) {
+    if (state.dirtySections.has("templates")) {
+      state.promptTemplates = normalizedPromptTemplatesPayload();
+      renderPromptTemplates();
+    }
+    clearDirty(sections);
+    showToast(`已保存：${sections.map((section) => DIRTY_LABELS[section] || section).join("、")}`);
+    if (sections.includes("cache")) await loadCache();
+  }
+  refreshDirtySummary();
+}
+
 function renderPromptTemplates() {
   const list = byId("template-list");
   if (!list) return;
@@ -813,9 +995,7 @@ function renderPromptTemplates() {
 
 async function savePromptTemplates(button) {
   setBusy(button, true, "保存中...");
-  const templates = state.promptTemplates
-    .map((item) => ({ trigger: String(item.trigger || "").trim(), prompt: String(item.prompt || "").trim() }))
-    .filter((item) => item.trigger && item.prompt);
+  const templates = normalizedPromptTemplatesPayload();
   const result = await callApi("保存模板", () => bridge.apiPost("save_templates", { templates }));
   setBusy(button, false);
   if (result?.success !== false) {
@@ -829,9 +1009,49 @@ function getRecordDate(record) {
   return String(record.created_at || record.time || "");
 }
 
+
+function normalizeHistoryUsers(records = []) {
+  const fromFacets = Array.isArray(state.historyFacets.users) ? state.historyFacets.users : [];
+  const users = new Map();
+  fromFacets.forEach((item) => {
+    if (item && typeof item === "object") {
+      const id = String(item.id || item.user_id || "").trim();
+      if (id) users.set(id, String(item.name || item.user_name || ""));
+    } else {
+      const id = String(item || "").trim();
+      if (id) users.set(id, "");
+    }
+  });
+  records.forEach((record) => {
+    const id = String(record.user_id || "").trim();
+    if (!id) return;
+    const name = String(record.user_name || "").trim();
+    if (name || !users.has(id)) users.set(id, name);
+  });
+  return [...users.entries()]
+    .map(([id, name]) => ({ id, name }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function formatUserLabel(userOrRecord) {
+  const id = String(userOrRecord?.id || userOrRecord?.user_id || "").trim();
+  const name = String(userOrRecord?.name || userOrRecord?.user_name || "").trim();
+  if (!id) return "-";
+  return name ? `${name}（${id}）` : id;
+}
+
+function userCellHtml(record) {
+  const id = String(record.user_id || "").trim();
+  const name = String(record.user_name || "").trim();
+  if (!id) return `<span class="muted-text">-</span>`;
+  return `<div class="user-cell"><span class="user-id">${escapeHtml(id)}</span>${name ? `<small class="user-name" title="${attrHtml(name)}">${escapeHtml(name)}</small>` : ""}</div>`;
+}
+
 function updateHistoryFilters(records) {
+  const userSelect = byId("filter-user");
   const modeSelect = byId("filter-mode");
   const modelSelect = byId("filter-model");
+  const currentUser = userSelect?.value || "";
   const currentMode = modeSelect?.value || "";
   const currentModel = modelSelect?.value || "";
   const modes = state.historyFacets.modes?.length
@@ -840,6 +1060,11 @@ function updateHistoryFilters(records) {
   const models = state.historyFacets.models?.length
     ? state.historyFacets.models
     : [...new Set(records.map((item) => item.model).filter(Boolean))];
+  const users = normalizeHistoryUsers(records);
+  if (userSelect) {
+    userSelect.innerHTML = `<option value="">全部触发人</option>${users.map((user) => `<option value="${attrHtml(user.id)}">${escapeHtml(formatUserLabel(user))}</option>`).join("")}`;
+    userSelect.value = users.some((user) => user.id === currentUser) ? currentUser : "";
+  }
   if (modeSelect) {
     modeSelect.innerHTML = `<option value="">全部模式</option>${modes.map((mode) => `<option value="${escapeHtml(mode)}">${escapeHtml(modeLabel(mode))}</option>`).join("")}`;
     modeSelect.value = modes.includes(currentMode) ? currentMode : "";
@@ -893,7 +1118,7 @@ function slideInfoHtml(item) {
     · ${escapeHtml(item.model || "未记录模型")}
     · ${escapeHtml(item.elapsed ? `${Number(item.elapsed).toFixed(1)}s` : "-")}
     · ${escapeHtml(formatDate(item.created_at))}
-    <br>触发人：${escapeHtml(item.user_id || "-")}
+    <br>触发人：${escapeHtml(formatUserLabel(item))}
     ${prompt}
   `;
 }
@@ -906,6 +1131,7 @@ function historySlideItems(records) {
         ...image,
         created_at: record.created_at,
         user_id: record.user_id,
+        user_name: record.user_name,
         group_id: record.group_id,
         mode: record.mode,
         prompt: record.prompt,
@@ -967,7 +1193,7 @@ function renderHistory() {
     return `
       <tr>
         <td>${escapeHtml(formatDate(record.created_at))}</td>
-        <td><span class="tag">${escapeHtml(record.user_id || "-")}</span></td>
+        <td>${userCellHtml(record)}</td>
         <td>${escapeHtml(modeLabel(record.mode))}</td>
         <td>${escapeHtml(record.model || "-")}</td>
         <td>${Number(record.elapsed || 0).toFixed(2)}s</td>
@@ -1015,6 +1241,7 @@ async function loadHistory() {
   state.historyFacets = {
     modes: Array.isArray(result.facets?.modes) ? result.facets.modes : [],
     models: Array.isArray(result.facets?.models) ? result.facets.models : [],
+    users: Array.isArray(result.facets?.users) ? result.facets.users : [],
   };
   updateHistoryFilters(state.history);
   renderHistory();
@@ -1301,7 +1528,10 @@ async function savePersonas(button, showMessage = true) {
   };
   const result = await callApi("保存自拍人设", () => bridge.apiPost("save_personas", payload));
   setBusy(button, false);
-  if (result?.success !== false && showMessage) showToast("自拍人设已保存。");
+  if (result?.success !== false) {
+    clearDirty(["personas"]);
+    if (showMessage) showToast("自拍人设已保存。");
+  }
   return result;
 }
 
@@ -1619,6 +1849,7 @@ async function loadConfigBundle() {
   state.activePersonaIndex = 0;
   state.activeStyleIndex = 0;
   renderAllConfig();
+  clearDirty();
   switchTab(state.pagePrefs.last_tab, { persist: false });
   setPageStatus();
 }
@@ -1631,18 +1862,20 @@ function bindEvents() {
   });
 
   byId("add-pipeline")?.addEventListener("click", openProviderModal);
-  byId("save-pipeline")?.addEventListener("click", (event) => savePipeline(event.currentTarget));
+  byId("save-all-config")?.addEventListener("click", (event) => saveAllConfig(event.currentTarget));
   byId("add-template")?.addEventListener("click", () => {
     const index = state.promptTemplates.length;
     state.promptTemplates.push({ trigger: "", prompt: "" });
     state.expandedTemplates.add(index);
     renderPromptTemplates();
+    markDirty("templates");
   });
-  byId("save-templates")?.addEventListener("click", (event) => savePromptTemplates(event.currentTarget));
   byId("refresh-history")?.addEventListener("click", (event) => refreshStatisticsView(event.currentTarget));
   byId("apply-filters")?.addEventListener("click", applyHistoryFilters);
-  byId("cache-enabled")?.addEventListener("change", toggleCache);
-  byId("save-cache-config")?.addEventListener("click", (event) => saveCacheConfig(event.currentTarget));
+  byId("cache-enabled")?.addEventListener("change", (event) => {
+    state.cache.enabled = event.target.checked;
+    markDirty("cache");
+  });
   byId("clear-cache")?.addEventListener("click", (event) => clearCache(event.currentTarget));
   byId("cache-prev")?.addEventListener("click", () => {
     state.cachePage = Math.max(1, state.cachePage - 1);
@@ -1690,8 +1923,8 @@ function bindEvents() {
     });
     state.activePersonaIndex = state.selfie.personas.length - 1;
     renderPersonaEditor();
+    markDirty("personas");
   });
-  byId("save-personas")?.addEventListener("click", (event) => savePersonas(event.currentTarget));
   byId("add-style")?.addEventListener("click", () => {
     const index = state.selfie.styles.length + 1;
     state.selfie.styles.push({
@@ -1704,8 +1937,8 @@ function bindEvents() {
     });
     state.activeStyleIndex = state.selfie.styles.length - 1;
     renderStyles();
+    markDirty("styles");
   });
-  byId("save-styles")?.addEventListener("click", (event) => saveStyles(event.currentTarget));
   byId("slide-close")?.addEventListener("click", closeSlideshow);
   byId("slide-prev")?.addEventListener("click", () => changeSlide(-1));
   byId("slide-next")?.addEventListener("click", () => changeSlide(1));
@@ -1735,6 +1968,7 @@ function bindEvents() {
       state.expandedPipeline.add(index);
       closeProviderModal();
       renderPipeline();
+      markDirty("pipeline");
       return;
     }
 
@@ -1758,17 +1992,20 @@ function bindEvents() {
         state.pipeline.splice(index, 1);
         state.expandedPipeline.delete(index);
         renderPipeline();
+        markDirty("pipeline");
       }
     }
     if (action === "pipeline-up") {
       reorderWithAnimation(byId("pipeline-list"), () => {
         moveItem(state.pipeline, index, index - 1, state.expandedPipeline);
       }, renderPipeline);
+      markDirty("pipeline");
     }
     if (action === "pipeline-down") {
       reorderWithAnimation(byId("pipeline-list"), () => {
         moveItem(state.pipeline, index, index + 1, state.expandedPipeline);
       }, renderPipeline);
+      markDirty("pipeline");
     }
     if (action === "template-toggle") {
       state.expandedTemplates.has(index) ? state.expandedTemplates.delete(index) : state.expandedTemplates.add(index);
@@ -1785,17 +2022,20 @@ function bindEvents() {
         state.promptTemplates.splice(index, 1);
         state.expandedTemplates.delete(index);
         renderPromptTemplates();
+        markDirty("templates");
       }
     }
     if (action === "template-up") {
       reorderWithAnimation(byId("template-list"), () => {
         moveItem(state.promptTemplates, index, index - 1, state.expandedTemplates);
       }, renderPromptTemplates);
+      markDirty("templates");
     }
     if (action === "template-down") {
       reorderWithAnimation(byId("template-list"), () => {
         moveItem(state.promptTemplates, index, index + 1, state.expandedTemplates);
       }, renderPromptTemplates);
+      markDirty("templates");
     }
     if (action === "history-slide") {
       const record = state.filteredHistory[index];
@@ -1826,6 +2066,7 @@ function bindEvents() {
         state.selfie.personas.splice(state.activePersonaIndex, 1);
         state.activePersonaIndex = Math.max(0, state.activePersonaIndex - 1);
         renderPersonaEditor();
+        markDirty("personas");
       }
     }
     if (action === "persona-image-delete") {
@@ -1853,6 +2094,7 @@ function bindEvents() {
         state.selfie.styles.splice(index, 1);
         state.activeStyleIndex = Math.max(0, Math.min(state.activeStyleIndex, state.selfie.styles.length - 1));
         renderStyles();
+        markDirty("styles");
       }
     }
   });
@@ -1863,6 +2105,19 @@ function bindEvents() {
     const template = event.target.closest("[data-template-field]");
     if (template && state.promptTemplates[Number(template.dataset.index)]) {
       state.promptTemplates[Number(template.dataset.index)][template.dataset.templateField] = template.value;
+      markDirty("templates");
+    }
+    if (["cache-max-mb", "cache-max-hours", "cache-max-count"].includes(event.target.id)) {
+      updateCacheConfigFromControls();
+      markDirty("cache");
+    }
+    if (["selfie-binding-mode", "selfie-manual-override", "selfie-default-persona-id"].includes(event.target.id)) {
+      updateSelfieControlsFromEditor();
+      markDirty("personas");
+    }
+    if (event.target.id === "style-selected-id") {
+      state.selfie.selected_style_id = event.target.value;
+      markDirty("styles");
     }
     const personaField = event.target.closest("[data-persona-field]");
     if (personaField) {
@@ -1870,6 +2125,7 @@ function bindEvents() {
       if (!persona) return;
       const key = personaField.dataset.personaField;
       persona[key] = personaField.dataset.personaType === "list" ? splitLines(personaField.value) : personaField.value;
+      markDirty("personas");
       if (key === "id" || key === "name") renderPersonaList();
     }
   });
@@ -1877,16 +2133,28 @@ function bindEvents() {
   document.body.addEventListener("change", (event) => {
     const bound = event.target.closest("[data-bind]");
     if (bound) updateBoundValue(bound);
-    if (event.target.id === "style-mode") state.selfie.style_mode = event.target.value;
-    if (event.target.id === "style-selected-id") state.selfie.selected_style_id = event.target.value;
+    if (["cache-max-mb", "cache-max-hours", "cache-max-count"].includes(event.target.id)) {
+      updateCacheConfigFromControls();
+      markDirty("cache");
+    }
+    if (["selfie-binding-mode", "selfie-manual-override", "selfie-default-persona-id"].includes(event.target.id)) {
+      updateSelfieControlsFromEditor();
+      markDirty("personas");
+    }
+    if (event.target.id === "style-mode") {
+      state.selfie.style_mode = event.target.value;
+      markDirty("styles");
+    }
+    if (event.target.id === "style-selected-id") {
+      state.selfie.selected_style_id = event.target.value;
+      markDirty("styles");
+    }
     if (event.target.id === "persona-upload-input") {
       uploadPersonaFiles(event.target.files);
       event.target.value = "";
     }
-    if (["filter-start", "filter-end", "filter-mode", "filter-model"].includes(event.target.id)) applyHistoryFilters();
+    if (["filter-start", "filter-end", "filter-user", "filter-mode", "filter-model"].includes(event.target.id)) applyHistoryFilters();
   });
-
-  byId("filter-user")?.addEventListener("input", scheduleHistoryFilter);
 
   document.body.addEventListener("click", (event) => {
     if (event.target.closest("#persona-upload-zone")) byId("persona-upload-input")?.click();

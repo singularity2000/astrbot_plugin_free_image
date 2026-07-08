@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import base64
 from io import BytesIO
 import json
@@ -42,7 +42,7 @@ PLUGIN_NAME = "astrbot_plugin_free_image"
     PLUGIN_NAME,
     "Singularity2000",
     "文生图、图生图，可自定义提示词模板，兼容多种端点",
-    "3.5.2",
+    "3.5.3",
     "https://github.com/singularity2000/astrbot_plugin_free_image",
 )
 class ImageGenerationPlugin(Star):
@@ -136,6 +136,7 @@ class ImageGenerationPlugin(Star):
             ("save_pipeline", self.page_save_pipeline, ["POST"], "保存 FreeImage API 管线"),
             ("save_templates", self.page_save_templates, ["POST"], "保存 FreeImage 提示词模板"),
             ("save_cache_config", self.page_save_cache_config, ["POST"], "保存 FreeImage 缓存配置"),
+            ("save_config_bundle", self.page_save_config_bundle, ["POST"], "统一保存 FreeImage Pages 配置"),
             ("set_cache_enabled", self.page_set_cache_enabled, ["POST"], "切换 FreeImage 缓存开关"),
             ("get_history", self.page_get_history, ["GET"], "获取 FreeImage 生图历史"),
             ("get_cache", self.page_get_cache, ["GET"], "获取 FreeImage 缓存列表"),
@@ -439,6 +440,82 @@ class ImageGenerationPlugin(Star):
         prefs = await self.history_cache.save_page_prefs(payload, web_request.username)
         return jsonify({"success": True, "prefs": prefs})
 
+    async def page_save_config_bundle(self):
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"success": False, "message": "请求体必须是 JSON 对象。"}), 400
+
+        saved_sections: list[str] = []
+        cache_changed = False
+
+        if "pipeline" in payload:
+            self.conf["api_pipeline"] = self._normalize_pipeline(payload.get("pipeline"))
+            saved_sections.append("pipeline")
+
+        raw_templates = payload.get("prompt_templates", payload.get("templates", None))
+        if raw_templates is not None:
+            self.conf["prompt_list"] = self._normalize_prompt_templates(raw_templates)
+            saved_sections.append("templates")
+
+        if isinstance(payload.get("cache"), dict):
+            cache_payload = payload.get("cache") or {}
+            cache_conf = self.conf.setdefault("cache", {})
+            cache_conf["enable_image_cache"] = bool(
+                cache_payload.get("enabled", cache_conf.get("enable_image_cache", False))
+            )
+            cache_conf["image_cache_max_size_mb"] = str(cache_payload.get("max_mb") or "").strip()
+            cache_conf["image_cache_max_age_hours"] = str(cache_payload.get("max_hours") or "").strip()
+            cache_conf["image_cache_max_count"] = str(cache_payload.get("max_count") or "").strip()
+            saved_sections.append("cache")
+            cache_changed = True
+
+        if isinstance(payload.get("selfie"), dict):
+            selfie_payload = payload.get("selfie") or {}
+            selfie_conf = self.conf.setdefault("selfie", {})
+            if "personas" in selfie_payload:
+                selfie_conf["selfie_personas"] = self._normalize_personas(selfie_payload.get("personas"))
+                saved_sections.append("personas")
+            if "binding_mode" in selfie_payload:
+                selfie_conf["selfie_binding_mode"] = str(
+                    selfie_payload.get("binding_mode") or "优先 AstrBot persona"
+                )
+            if "manual_override" in selfie_payload:
+                selfie_conf["selfie_persona_manual_override"] = str(
+                    selfie_payload.get("manual_override") or ""
+                )
+            if "default_persona_id" in selfie_payload:
+                selfie_conf["selfie_default_persona_id"] = str(
+                    selfie_payload.get("default_persona_id") or ""
+                )
+
+            if "styles" in selfie_payload:
+                selfie_conf["selfie_styles"] = self._normalize_styles(selfie_payload.get("styles"))
+                saved_sections.append("styles")
+            if "style_mode" in selfie_payload or "mode" in selfie_payload:
+                selfie_conf["selfie_style_mode"] = str(
+                    selfie_payload.get("style_mode", selfie_payload.get("mode", "自动")) or "自动"
+                )
+            if "selected_style_id" in selfie_payload:
+                selfie_conf["selfie_selected_style_id"] = str(
+                    selfie_payload.get("selected_style_id") or ""
+                )
+
+        # 去重并保持原始顺序，便于前端提示。
+        saved_sections = list(dict.fromkeys(saved_sections))
+        if not saved_sections:
+            return jsonify({"success": True, "message": "没有需要保存的配置。", "saved_sections": []})
+
+        await self.save_config_and_refresh_runtime()
+        cleanup = await self.history_cache.enforce_limits(reason="config") if cache_changed else None
+        return jsonify(
+            {
+                "success": True,
+                "message": "配置已保存。",
+                "saved_sections": saved_sections,
+                "cleanup": cleanup,
+            }
+        )
+
     async def page_save_pipeline(self):
         payload = await request.get_json(silent=True)
         if not isinstance(payload, dict):
@@ -660,19 +737,9 @@ class ImageGenerationPlugin(Star):
             prompt(string): Change the user's input into a professional image generation prompt while strictly preserving the original intent.
             count(int): 生图数量（1~3），若不指定，默认为1。除非用户明确要求，否则跳过此参数。
         """
-        # 检测是否包含图片组件（直接发送或引用）
-        has_direct_image = False
-        for seg in event.message_obj.message:
-            if isinstance(seg, Image):
-                has_direct_image = True
-                break
-            if isinstance(seg, Reply) and seg.chain:
-                if any(isinstance(s, Image) for s in seg.chain):
-                    has_direct_image = True
-                    break
-
-        # 智能决策：有图则图生图，无图则文生图
-        is_i2i = has_direct_image
+        # 智能决策：有显式图片/引用图则图生图；@ 头像和发送者头像兜底不触发 LLM 图生图。
+        # AstrBot v4.26+ 的 LLM 场景中，引用图可能不在 Reply.chain，而在 provider_request/quoted extractor 中。
+        is_i2i = bool(self.iwf and await self.iwf.has_context_images(event))
 
         # clamp count 到 1~3
         try:
@@ -848,7 +915,7 @@ class ImageGenerationPlugin(Star):
                 yield self._quoted_plain_result(event, "请发送或引用一张图片。")
                 return
 
-            MAX_IMAGES = 5
+            MAX_IMAGES = 10
             original_count = len(img_bytes_list)
             if original_count > MAX_IMAGES:
                 images_to_process = img_bytes_list[:MAX_IMAGES]
@@ -1044,6 +1111,7 @@ class ImageGenerationPlugin(Star):
         try:
             await self.history_cache.record_generation(
                 user_id=event.get_sender_id(),
+                user_name=event.get_sender_name(),
                 group_id=event.get_group_id() or "",
                 mode=mode,
                 request_source=request_source,
@@ -1279,7 +1347,7 @@ class ImageGenerationPlugin(Star):
         prompt = build_selfie_prompt(persona, action, style, bool(extra_images))
         persona_name = persona.get("name", persona.get("id", ""))
         style_name = style.get("name", "") if style else "无风格"
-        logger.info(f"[Selfie] 人设={persona_name}, 风格={style_name}, 参考图={len(images_to_send)}张")
+        logger.info(f"[Selfie] 人设={persona_name}, 风格={style_name}, 参考图={len(images_to_send)}张（人设{len(persona_images)}张，额外{len(extra_images)}张）")
 
         if not is_llm_tool and not concise:
             await self._send_plain_direct(event, f"📸 正在生成自拍 [{persona_name}]…")

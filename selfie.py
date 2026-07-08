@@ -221,14 +221,14 @@ def build_selfie_prompt(
 
 # ─────────────────────────── 图片组合 ───────────────────────────
 
-MAX_TOTAL_IMAGES = 5  # 与现有 handle_image_gen_logic 保持一致
+MAX_TOTAL_IMAGES = 10  # 与现有 handle_image_gen_logic 保持一致
 
 
 def combine_images(
     persona_images: list[bytes],
     extra_images: list[bytes],
 ) -> list[bytes]:
-    """人设图优先，补充用户额外图，总数不超过 MAX_TOTAL_IMAGES。"""
+    """人设图优先，补充用户额外图，总数不超过 MAX_TOTAL_IMAGES，超出时优先保留人设图并丢弃靠后的额外图。"""
     combined = list(persona_images)
     remaining = MAX_TOTAL_IMAGES - len(combined)
     if remaining > 0:

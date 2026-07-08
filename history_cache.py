@@ -55,6 +55,7 @@ class ImageHistoryCache:
         self,
         *,
         user_id: str,
+        user_name: str = "",
         group_id: str,
         mode: str,
         request_source: str,
@@ -86,6 +87,7 @@ class ImageHistoryCache:
                         created_at=created_at,
                         index=index,
                         user_id=user_id,
+                        user_name=user_name,
                         group_id=group_id,
                         mode=mode,
                         request_source=request_source,
@@ -102,6 +104,7 @@ class ImageHistoryCache:
                 "id": record_id,
                 "created_at": created_at,
                 "user_id": str(user_id or ""),
+                "user_name": str(user_name or ""),
                 "group_id": str(group_id or ""),
                 "mode": str(mode or ""),
                 "request_source": str(request_source or ""),
@@ -282,7 +285,7 @@ class ImageHistoryCache:
                 continue
             if end and date > end:
                 continue
-            if user and user not in str(record.get("user_id") or ""):
+            if user and str(record.get("user_id") or "") != user:
                 continue
             if mode and str(record.get("mode") or "") != mode:
                 continue
@@ -328,10 +331,23 @@ class ImageHistoryCache:
         }
 
     @staticmethod
-    def _history_facets(records: list[dict[str, Any]]) -> dict[str, list[str]]:
+    def _history_facets(records: list[dict[str, Any]]) -> dict[str, Any]:
         modes = sorted({str(item.get("mode") or "") for item in records if item.get("mode")})
         models = sorted({str(item.get("model") or "") for item in records if item.get("model")})
-        return {"modes": modes, "models": models}
+        user_names: dict[str, str] = {}
+        for item in records:
+            user_id = str(item.get("user_id") or "")
+            if not user_id:
+                continue
+            user_name = str(item.get("user_name") or "")
+            # 后出现的昵称更接近当前平台资料；获取失败则保留已有非空昵称。
+            if user_name or user_id not in user_names:
+                user_names[user_id] = user_name
+        users = [
+            {"id": user_id, "name": user_names.get(user_id, "")}
+            for user_id in sorted(user_names)
+        ]
+        return {"modes": modes, "models": models, "users": users}
 
     async def save_page_prefs(
         self, updates: dict[str, Any], username: str | None = None
@@ -503,6 +519,7 @@ class ImageHistoryCache:
         created_at: str,
         index: int,
         user_id: str,
+        user_name: str,
         group_id: str,
         mode: str,
         request_source: str,
@@ -527,6 +544,7 @@ class ImageHistoryCache:
             "mime_type": mime_type,
             "index": index,
             "user_id": str(user_id or ""),
+            "user_name": str(user_name or ""),
             "group_id": str(group_id or ""),
             "mode": str(mode or ""),
             "request_source": str(request_source or ""),
