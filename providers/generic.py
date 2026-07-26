@@ -19,7 +19,7 @@ class GenericImageProvider(BaseProvider):
     ) -> Union[bytes, list[bytes], str]:
         api_url = self.node.get("api_url")
         if not api_url:
-            return f"{self.name}: 配置错误 - 未设置 API URL"
+            return "配置错误 - 未设置 API URL"
 
         model_name = self.node.get("model")
         payload: Dict[str, Any] = {"model": model_name, "prompt": prompt}
@@ -39,7 +39,7 @@ class GenericImageProvider(BaseProvider):
             attempt_no = i + 1
             api_key = await self._get_api_key()
             if not api_key:
-                return f"{self.name}: 配置错误 - 无 API Key"
+                return "配置错误 - 无 API Key"
             resource_exhausted = False
             headers = {
                 "Content-Type": "application/json",
@@ -88,4 +88,4 @@ class GenericImageProvider(BaseProvider):
                 resource_exhausted=resource_exhausted,
             )
 
-        return f"{self.name} 生成失败: {last_err}"
+        return f"生成失败: {last_err}"

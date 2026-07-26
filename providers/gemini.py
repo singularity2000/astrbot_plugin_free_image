@@ -17,7 +17,7 @@ class GeminiProvider(BaseProvider):
         api_url = self.node.get("api_url")
         model_name = self.node.get("model", "gemini-3.1-flash-image-preview")
         if not api_url:
-            return f"{self.name}: 配置错误 - 未设置 API URL"
+            return "配置错误 - 未设置 API URL"
 
         url = f"{api_url}/{model_name}:generateContent"
         context = self._build_context(model_name, image_bytes_list, prompt)
@@ -27,7 +27,7 @@ class GeminiProvider(BaseProvider):
             attempt_no = attempt + 1
             api_key = await self._get_api_key()
             if not api_key:
-                return f"{self.name}: 配置错误 - 无 API Key"
+                return "配置错误 - 无 API Key"
             resource_exhausted = False
 
             headers = {
@@ -72,7 +72,7 @@ class GeminiProvider(BaseProvider):
                 resource_exhausted=resource_exhausted,
             )
 
-        return f"Gemini 生成失败: {last_err}"
+        return f"生成失败: {last_err}"
 
     async def _read_response_payload(self, resp) -> Dict[str, Any]:
         """兼容反代场景：边读边解析，拿到完整 JSON 立即返回，不等待连接关闭。"""

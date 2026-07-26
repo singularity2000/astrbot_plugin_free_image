@@ -914,6 +914,34 @@ label {
   min-width: 150px;
 }
 
+.settings-groups {
+  display: grid;
+  gap: 14px;
+}
+
+.settings-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 14px;
+}
+
+.settings-card .panel-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+/* 自拍页顶部的通用设置：作用于整页，不属于任何单个人设。 */
+.selfie-controls {
+  margin-bottom: 16px;
+}
+
+.selfie-controls label {
+  min-width: 210px;
+  flex: 1 1 210px;
+}
+
 .cache-strip {
   justify-content: space-between;
   margin-bottom: 14px;
@@ -1264,6 +1292,69 @@ label {
   max-width: 100%;
   max-height: 78vh;
   object-fit: contain;
+}
+
+/* 加载中和加载失败时彻底隐藏 <img>，避免浏览器画出自带的裂图图标。
+   不用 transition，否则渐隐的那一瞬间仍会闪出裂图。 */
+.slide-figure[data-slide-state="loading"] img,
+.slide-figure[data-slide-state="error"] img {
+  visibility: hidden;
+  opacity: 0;
+}
+
+.slide-figure[data-slide-state="loading"],
+.slide-figure[data-slide-state="error"] {
+  min-width: min(320px, 70vw);
+  min-height: min(240px, 40vh);
+  place-content: center;
+}
+
+.slide-status {
+  position: absolute;
+  inset: 0;
+  display: none;
+  place-items: center;
+  align-content: center;
+  gap: 12px;
+  color: var(--overlay-text);
+  text-align: center;
+  font-size: 13px;
+  pointer-events: none;
+}
+
+.slide-figure[data-slide-state="loading"] .slide-status,
+.slide-figure[data-slide-state="error"] .slide-status {
+  display: grid;
+}
+
+.slide-figure[data-slide-state="loading"] .slide-broken,
+.slide-figure[data-slide-state="error"] .slide-spinner {
+  display: none;
+}
+
+.slide-spinner {
+  width: 34px;
+  height: 34px;
+  border: 3px solid rgba(255, 255, 255, 0.22);
+  border-top-color: var(--overlay-text);
+  border-radius: 50%;
+  animation: slide-spin 0.8s linear infinite;
+}
+
+.slide-broken {
+  opacity: 0.75;
+}
+
+@keyframes slide-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .slide-spinner {
+    animation-duration: 2.4s;
+  }
 }
 
 .slide-figure figcaption {

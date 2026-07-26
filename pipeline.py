@@ -6,6 +6,7 @@ from astrbot import logger
 from astrbot.core import AstrBotConfig
 
 from .providers import BaseProvider, create_provider
+from .providers.base import node_display_name
 from .workflow import ImageWorkflow
 
 
@@ -25,11 +26,14 @@ class ImageGenPipeline:
     def build(self, pipeline_config: list):
         """从配置列表构建 Provider 链。"""
         self.providers.clear()
-        for node in pipeline_config:
+        # 序号取自原始配置下标：未知模板会被 create_provider 跳过，
+        # 直接对 self.providers 重新编号会和 `画图模型` 的序号错位。
+        for index, node in enumerate(pipeline_config, start=1):
             provider = create_provider(node, self.iwf, self.conf)
             if provider:
+                provider.pipeline_index = index
                 self.providers.append(provider)
-        enabled_names = [p.name for p in self.providers if p.enabled]
+        enabled_names = [p.log_label for p in self.providers if p.enabled]
         logger.info(
             f"API 管线构建完成: {enabled_names} "
             f"({len(self.providers)} 个节点, {len(enabled_names)} 个已启用)"
@@ -70,30 +74,29 @@ class ImageGenPipeline:
                 )
             provider = self.providers[model_index - 1]
             if not provider.enabled:
-                model_name = provider.node.get("model") or provider.name
                 return (
-                    f"模型 {model_index}🔴{model_name} 已关闭，请选择其他模型。",
+                    f"模型 {model_index}🔴{node_display_name(provider.node)} 已关闭，请选择其他模型。",
                     None,
                 )
-            logger.info(f"[Pipeline] 指定模型: {provider.name}")
+            logger.info(f"[Pipeline] 指定模型: {provider.log_label}")
             result = await provider.generate(image_bytes_list, prompt)
             if isinstance(result, (bytes, list, dict)):
-                model_name = provider.node.get("model")
-                return result, str(model_name) if model_name else None
-            logger.warning(f"[Pipeline] 指定模型 {provider.name} 失败: {result}")
-            return f"指定模型 {provider.name} 失败: {result}", None
+                return result, node_display_name(provider.node)
+            logger.warning(f"[Pipeline] 指定模型 {provider.log_label} 失败: {result}")
+            return f"指定模型 {provider.label} 失败: {result}", None
 
         errors: List[str] = []
         for provider in self.providers:
             if not provider.enabled:
                 continue
-            logger.info(f"[Pipeline] 尝试: {provider.name}")
+            logger.info(f"[Pipeline] 尝试: {provider.log_label}")
             result = await provider.generate(image_bytes_list, prompt)
             if isinstance(result, (bytes, list, dict)):
-                model_name = provider.node.get("model")
-                return result, str(model_name) if model_name else None
-            logger.warning(f"[Pipeline] {provider.name} 失败: {result}")
-            errors.append(f"{provider.name}: {result}")
+                logger.info(f"[Pipeline] 成功: {provider.log_label}")
+                return result, node_display_name(provider.node)
+            logger.warning(f"[Pipeline] {provider.log_label} 失败: {result}")
+            # 对外文案只给序号和模型名，不带 API 主机名。
+            errors.append(f"{provider.label}: {result}")
 
         if not errors:
             return (

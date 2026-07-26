@@ -35,7 +35,7 @@ class OpenAIResponsesProvider(BaseProvider):
             attempt_no = i + 1
             api_key = await self._get_api_key()
             if not api_key:
-                return f"{self.name}: 配置错误 - 无 API Key"
+                return "配置错误 - 无 API Key"
             resource_exhausted = False
 
             try:
@@ -85,4 +85,4 @@ class OpenAIResponsesProvider(BaseProvider):
                 resource_exhausted=resource_exhausted,
             )
 
-        return f"OpenAI Responses 生成失败: {last_err}"
+        return f"生成失败: {last_err}"

@@ -278,7 +278,7 @@ class OpenAICompatChatProvider(BaseProvider):
         api_url = self.node.get("api_url")
         model_name = self.node.get("model")
         if not api_url:
-            return f"{self.name}: 配置错误 - 无 API URL"
+            return "配置错误 - 无 API URL"
 
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         for img in image_bytes_list:
@@ -303,7 +303,7 @@ class OpenAICompatChatProvider(BaseProvider):
             attempt_no = i + 1
             api_key = await self._get_api_key()
             if not api_key:
-                return f"{self.name}: 配置错误 - 无 API Key"
+                return "配置错误 - 无 API Key"
 
             resource_exhausted = False
 
@@ -385,7 +385,7 @@ class OpenAICompatChatProvider(BaseProvider):
                 resource_exhausted=resource_exhausted,
             )
 
-        return f"OpenAI 兼容 Chat Completions 生成失败: {last_err}"
+        return f"生成失败: {last_err}"
 
 
 class Flow2APIProvider(OpenAICompatChatProvider):

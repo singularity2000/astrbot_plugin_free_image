@@ -189,34 +189,24 @@ def resolve_style(conf: AstrBotConfig, text: str, style_id_override: str = "") -
 
 # ─────────────────────────── Prompt 拼接 ───────────────────────────
 
+def _clean_prompt_part(text: str) -> str:
+    """去掉首尾空白和段末多余的逗号，避免空格拼接后出现「描述, 风格」。"""
+    return str(text or "").strip().rstrip(",，").strip()
+
+
 def build_selfie_prompt(
     persona: dict,
     action: str,
     style: Optional[dict],
-    has_extra_images: bool,
 ) -> str:
-    """拼接最终自拍 prompt。"""
+    """拼接最终自拍 prompt：人设描述 + 动作 + 风格，各段以空格分隔。"""
     parts: list[str] = []
 
-    desc = str(persona.get("description", "")).strip()
-    if desc:
-        parts.append(desc)
+    for raw in (persona.get("description", ""), action, (style or {}).get("prompt", "")):
+        if cleaned := _clean_prompt_part(raw):
+            parts.append(cleaned)
 
-    if action:
-        parts.append(action.strip())
-
-    if has_extra_images:
-        parts.append(
-            "Use the additional reference image(s) only for pose, outfit, or scene reference; "
-            "preserve the character's established identity from the persona reference image."
-        )
-
-    if style:
-        style_prompt = str(style.get("prompt", "")).strip()
-        if style_prompt:
-            parts.append(style_prompt)
-
-    return ", ".join(parts)
+    return " ".join(parts)
 
 
 # ─────────────────────────── 图片组合 ───────────────────────────

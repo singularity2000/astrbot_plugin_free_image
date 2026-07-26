@@ -14,7 +14,9 @@ const FULL_IMAGE_TIMEOUT_MS = 45000;
 const PREVIEW_CONCURRENCY = 3;
 const THEME_KEY = "freeimage.theme";
 const THEME_VALUES = new Set(["system", "light", "dark"]);
-const TAB_VALUES = new Set(["pipeline", "templates", "selfie", "history"]);
+const TAB_VALUES = new Set(["pipeline", "templates", "selfie", "history", "settings"]);
+// 设置页的字段用 "settings:<分组>" 作为 data-bind，区分于管线/风格的绑定。
+const SETTINGS_SECTION_PREFIX = "settings:";
 const DEFAULT_THEME = "system";
 const DEFAULT_CACHE_PAGE_SIZE = 24;
 const DEFAULT_HISTORY_PAGE_SIZE = 20;
@@ -93,6 +95,7 @@ const state = {
     history_page_size: DEFAULT_HISTORY_PAGE_SIZE,
     last_tab: "pipeline",
   },
+  settings: {},
   selfie: {
     binding_mode: "优先 AstrBot persona",
     manual_override: "",
@@ -121,6 +124,7 @@ const DIRTY_LABELS = {
   cache: "缓存",
   personas: "自拍人设",
   styles: "自拍风格",
+  settings: "设置",
 };
 
 function stableStringify(value) {
@@ -606,7 +610,7 @@ function fieldHtml(section, index, key, field, value) {
 }
 
 function updateBoundValue(input) {
-  const section = input.dataset.bind;
+  const section = input.dataset.bind || "";
   const index = Number(input.dataset.index);
   const key = input.dataset.key;
   const type = input.dataset.type;
@@ -625,6 +629,13 @@ function updateBoundValue(input) {
     input.classList.remove("input-error");
   }
 
+  if (section.startsWith(SETTINGS_SECTION_PREFIX)) {
+    const group = section.slice(SETTINGS_SECTION_PREFIX.length);
+    if (!state.settings[group]) state.settings[group] = {};
+    state.settings[group][key] = value;
+    markDirty("settings");
+    return;
+  }
   if (section === "pipeline" && state.pipeline[index]) {
     state.pipeline[index][key] = value;
     markDirty("pipeline");
@@ -870,6 +881,7 @@ function stylesPayload() {
 }
 
 function sectionPayload(section) {
+  if (section === "settings") return deepClone(state.settings);
   if (section === "pipeline") return deepClone(state.pipeline);
   if (section === "templates") return normalizedPromptTemplatesPayload();
   if (section === "cache") {
@@ -905,6 +917,7 @@ async function saveAllConfig(button) {
   const payload = {};
   if (state.dirtySections.has("pipeline")) payload.pipeline = state.pipeline;
   if (state.dirtySections.has("templates")) payload.prompt_templates = normalizedPromptTemplatesPayload();
+  if (state.dirtySections.has("settings")) payload.settings = deepClone(state.settings);
   if (state.dirtySections.has("cache")) {
     updateCacheConfigFromControls();
     payload.cache = {
@@ -1040,6 +1053,14 @@ function formatUserLabel(userOrRecord) {
   return name ? `${name}（${id}）` : id;
 }
 
+function formatTriggerLabel(record) {
+  // 历史/缓存条目的 id 是记录或缓存图片自身的 uuid，触发人只能取 user_id / user_name。
+  const id = String(record?.user_id || "").trim();
+  const name = String(record?.user_name || "").trim();
+  if (!id) return "";
+  return name ? `${name}（${id}）` : id;
+}
+
 function userCellHtml(record) {
   const id = String(record.user_id || "").trim();
   const name = String(record.user_name || "").trim();
@@ -1113,12 +1134,18 @@ function renderBars(containerId, groups, labelFormatter = (value) => value) {
 
 function slideInfoHtml(item) {
   const prompt = item.prompt ? `<br><span>${escapeHtml(item.prompt)}</span>` : "";
+  const trigger = formatTriggerLabel(item);
+  const meta = [
+    modeLabel(item.mode),
+    item.model || "未记录模型",
+    item.elapsed ? `${Number(item.elapsed).toFixed(1)}s` : "-",
+    formatDate(item.created_at),
+  ];
+  if (item.size_bytes) meta.push(formatBytes(item.size_bytes));
   return `
-    <strong>${escapeHtml(modeLabel(item.mode))}</strong>
-    · ${escapeHtml(item.model || "未记录模型")}
-    · ${escapeHtml(item.elapsed ? `${Number(item.elapsed).toFixed(1)}s` : "-")}
-    · ${escapeHtml(formatDate(item.created_at))}
-    <br>触发人：${escapeHtml(formatUserLabel(item))}
+    <strong>${escapeHtml(meta[0])}</strong>
+    ${meta.slice(1).map((value) => `· ${escapeHtml(value)}`).join(" ")}
+    ${trigger ? `<br>触发人：${escapeHtml(trigger)}` : ""}
     ${prompt}
   `;
 }
@@ -1276,8 +1303,11 @@ function renderCacheGrid() {
   }
   grid.innerHTML = pageItems.map((image, offset) => {
     const displayIndex = (state.cachePage - 1) * state.cachePageSize + offset + 1;
+    const tileTitle = [image.size_bytes ? formatBytes(image.size_bytes) : "", image.prompt || ""]
+      .filter(Boolean)
+      .join(" · ");
     return `
-    <figure class="image-tile" data-preview-card data-preview-kind="cache" data-cache-id="${attrHtml(image.id || "")}" title="${attrHtml(image.prompt || "")}">
+    <figure class="image-tile" data-preview-card data-preview-kind="cache" data-cache-id="${attrHtml(image.id || "")}" title="${attrHtml(tileTitle)}">
       <button class="image-preview" data-action="cache-slide" data-index="${offset}" type="button" aria-label="浏览缓存图片 ${displayIndex}">
         <img alt="缓存图片 ${displayIndex}" loading="lazy" />
         <span class="preview-placeholder">图片未加载成功</span>
@@ -1426,6 +1456,48 @@ function renderPersonaList() {
   `).join("");
 }
 
+function renderSettings() {
+  const host = byId("settings-groups");
+  if (!host) return;
+  const schema = state.schema?.settings || {};
+  const groups = Object.entries(schema);
+  if (!groups.length) {
+    host.innerHTML = `<div class="empty">没有可编辑的设置项。</div>`;
+    return;
+  }
+  host.innerHTML = groups.map(([group, entry]) => {
+    const values = state.settings[group] || {};
+    const fields = Object.entries(entry.items || {})
+      .map(([key, field]) => fieldHtml(
+        `${SETTINGS_SECTION_PREFIX}${group}`,
+        0,
+        key,
+        field,
+        values[key] ?? defaultValueForField(field),
+      ))
+      .join("");
+    return `
+      <section class="settings-card">
+        <div class="panel-title">${escapeHtml(entry.description || group)}</div>
+        <div class="form-grid">${fields}</div>
+      </section>
+    `;
+  }).join("");
+}
+
+function renderSelfieControls() {
+  const binding = byId("selfie-binding-mode");
+  if (binding) {
+    binding.innerHTML = ["优先 AstrBot persona", "优先会话 SID", "只使用手动指定的selfie人设"].map((item) => (
+      `<option value="${escapeHtml(item)}" ${item === state.selfie.binding_mode ? "selected" : ""}>${escapeHtml(item)}</option>`
+    )).join("");
+  }
+  const manual = byId("selfie-manual-override");
+  if (manual) manual.value = state.selfie.manual_override || "";
+  const defaultPersona = byId("selfie-default-persona-id");
+  if (defaultPersona) defaultPersona.value = state.selfie.default_persona_id || "";
+}
+
 function renderPersonaEditor() {
   const editor = byId("persona-editor");
   if (!editor) return;
@@ -1437,22 +1509,6 @@ function renderPersonaEditor() {
   }
   editor.innerHTML = `
     <div class="form-grid">
-      <label class="form-field">
-        <span>绑定模式</span>
-        <select id="selfie-binding-mode">
-          ${["优先 AstrBot persona", "优先会话 SID", "只使用手动指定的selfie人设"].map((item) => (
-            `<option value="${escapeHtml(item)}" ${item === state.selfie.binding_mode ? "selected" : ""}>${escapeHtml(item)}</option>`
-          )).join("")}
-        </select>
-      </label>
-      <label class="form-field">
-        <span>手动指定人设 ID</span>
-        <input id="selfie-manual-override" type="text" value="${escapeHtml(state.selfie.manual_override || "")}" />
-      </label>
-      <label class="form-field">
-        <span>全局默认人设 ID</span>
-        <input id="selfie-default-persona-id" type="text" value="${escapeHtml(state.selfie.default_persona_id || "")}" />
-      </label>
       <label class="form-field">
         <span>人设 ID</span>
         <input data-persona-field="id" type="text" value="${escapeHtml(persona.id || "")}" />
@@ -1504,9 +1560,13 @@ function renderPersonaEditor() {
 }
 
 function updateSelfieControlsFromEditor() {
-  state.selfie.binding_mode = byId("selfie-binding-mode")?.value || state.selfie.binding_mode;
-  state.selfie.manual_override = byId("selfie-manual-override")?.value || "";
-  state.selfie.default_persona_id = byId("selfie-default-persona-id")?.value || "";
+  // 控件不存在时保留 state 原值，避免把已有配置写成空字符串。
+  const binding = byId("selfie-binding-mode");
+  if (binding && binding.value) state.selfie.binding_mode = binding.value;
+  const manual = byId("selfie-manual-override");
+  if (manual) state.selfie.manual_override = manual.value.trim();
+  const defaultPersona = byId("selfie-default-persona-id");
+  if (defaultPersona) state.selfie.default_persona_id = defaultPersona.value.trim();
 }
 
 async function savePersonas(button, showMessage = true) {
@@ -1692,7 +1752,20 @@ function closeSlideshow() {
   const modal = byId("slideshow");
   modal.classList.remove("active");
   modal.setAttribute("aria-hidden", "true");
+  const image = byId("slide-img");
+  if (image) {
+    image.onload = null;
+    image.onerror = null;
+  }
+  setSlideState("loading", "正在加载图片…");
   document.removeEventListener("keydown", onSlideKeydown);
+}
+
+function setSlideState(nextState, message = "") {
+  const figure = byId("slide-figure");
+  if (figure) figure.dataset.slideState = nextState;
+  const text = byId("slide-status-text");
+  if (text) text.textContent = message;
 }
 
 async function updateSlide() {
@@ -1700,17 +1773,32 @@ async function updateSlide() {
   if (!item) return;
   const expectedIndex = state.slideIndex;
   const image = byId("slide-img");
+  image.onload = null;
+  image.onerror = null;
   image.removeAttribute("src");
   image.alt = item.display_name || "图片预览";
+  setSlideState("loading", "正在加载图片…");
   byId("slide-info").innerHTML = slideInfoHtml(item);
   byId("slide-count").textContent = `${state.slideIndex + 1} / ${state.slideItems.length}`;
   const src = await ensureImageDataUrl(item);
   if (expectedIndex !== state.slideIndex) return;
-  if (src) {
-    image.src = src;
-  } else {
+  if (!src) {
+    setSlideState("error", "图片加载失败，可能是网络问题或文件已不存在。");
     showToast("这张图片未加载成功。", "error");
+    return;
   }
+  // 拿到地址不代表能显示：data URL 之外的回退地址仍可能在弱网下失败。
+  image.onload = () => {
+    if (expectedIndex === state.slideIndex) setSlideState("ready");
+  };
+  image.onerror = () => {
+    if (expectedIndex !== state.slideIndex) return;
+    // 清掉失败的地址，浏览器就不会再为这张图保留裂图占位。
+    image.removeAttribute("src");
+    setSlideState("error", "图片加载失败，可能是网络问题或文件已不存在。");
+    showToast("这张图片未加载成功。", "error");
+  };
+  image.src = src;
 }
 
 async function deleteCacheImage(cacheId) {
@@ -1766,6 +1854,8 @@ function renderAllConfig() {
   renderPipeline();
   renderPromptTemplates();
   renderCacheSettings();
+  renderSettings();
+  renderSelfieControls();
   renderPersonaEditor();
   renderStyles();
 }
@@ -1823,6 +1913,7 @@ async function loadConfigBundle() {
   state.pipeline = Array.isArray(config.pipeline) ? deepClone(config.pipeline) : [];
   state.promptTemplates = Array.isArray(config.prompt_templates) ? deepClone(config.prompt_templates) : [];
   state.cache = { ...state.cache, ...(config.cache || {}) };
+  state.settings = config.settings && typeof config.settings === "object" ? deepClone(config.settings) : {};
   const pagePrefs = config.page_prefs || {};
   state.pagePrefs = {
     theme: THEME_VALUES.has(String(pagePrefs.theme || "").trim().toLowerCase())

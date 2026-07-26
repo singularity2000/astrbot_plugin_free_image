@@ -73,9 +73,9 @@ class OpenAIImagesProvider(BaseProvider):
         api_url = self.node.get("api_url")
         model_name = self.node.get("model")
         if not api_url:
-            return f"{self.name}: 配置错误 - 未设置 API URL"
+            return "配置错误 - 未设置 API URL"
         if not model_name:
-            return f"{self.name}: 配置错误 - 未设置模型名称"
+            return "配置错误 - 未设置模型名称"
 
         n = int(self.node.get("n", 1))
         size = self._determine_size(prompt, image_bytes_list)
@@ -85,7 +85,7 @@ class OpenAIImagesProvider(BaseProvider):
             attempt_no = i + 1
             api_key = await self._get_api_key()
             if not api_key:
-                return f"{self.name}: 配置错误 - 无 API Key"
+                return "配置错误 - 无 API Key"
 
             resource_exhausted = False
             headers = {"Authorization": f"Bearer {api_key}"}
@@ -129,7 +129,7 @@ class OpenAIImagesProvider(BaseProvider):
                 resource_exhausted=resource_exhausted,
             )
 
-        return f"OpenAI Images 生成失败: {last_err}"
+        return f"生成失败: {last_err}"
 
     @staticmethod
     def _build_api_url(api_url: str, endpoint: str) -> str:

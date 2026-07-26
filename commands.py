@@ -7,6 +7,8 @@ from astrbot import logger
 from astrbot.core.message.components import At, Image, Reply
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
+from .history_cache import format_size
+from .providers.base import node_display_name
 from .selfie import find_persona, find_style, resolve_persona
 
 
@@ -48,11 +50,7 @@ class CommandHandlers:
 
     @staticmethod
     def get_model_display_name(node: dict) -> str:
-        model_name = str(node.get("model", "")).strip()
-        if model_name:
-            return model_name
-        template_key = str(node.get("__template_key", "")).strip()
-        return template_key or "未命名模型"
+        return node_display_name(node)
 
     def format_model_pipeline_message(self, prefix: str = "", is_admin: bool = True) -> str:
         pipeline_config = self.get_api_pipeline_config()
@@ -398,7 +396,7 @@ class CommandHandlers:
         if raw == "清理":
             result = await p.history_cache.clear_cache(reason="command")
             yield event.plain_result(
-                f"✅ 已清理画图缓存：删除 {result['deleted_count']} 张，释放 {result['deleted_bytes']} bytes。"
+                f"✅ 已清理画图缓存：删除 {result['deleted_count']} 张，释放 {format_size(result['deleted_bytes'])}。"
             )
             event.stop_event()
             return
@@ -413,7 +411,7 @@ class CommandHandlers:
             yield event.plain_result(
                 "画图缓存状态：\n"
                 f"状态: {enabled_text}\n"
-                f"当前缓存: {stats.get('total_count', 0)} 张，{stats.get('total_bytes', 0)} bytes\n"
+                f"当前缓存: {stats.get('total_count', 0)} 张，{format_size(stats.get('total_bytes', 0))}\n"
                 + "\n".join(limit_parts)
             )
             event.stop_event()

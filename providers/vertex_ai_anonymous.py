@@ -312,7 +312,7 @@ class VertexAIAnonymousProvider(BaseProvider):
                     f"Vertex AI API 调用失败，达到最大重试次数 ({attempt}/{self.max_retry}): {last_err}"
                 )
 
-        return f"Vertex AI 生成失败: {last_err}"
+        return f"生成失败: {last_err}"
 
     def _build_body(self, prompt: str, image_bytes_list: List[bytes]) -> dict:
         model_name = self.node.get("model", "gemini-3-pro-image-preview")

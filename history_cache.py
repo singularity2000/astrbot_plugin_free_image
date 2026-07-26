@@ -14,6 +14,21 @@ from astrbot import logger
 
 HISTORY_VERSION = 1
 CACHE_VERSION = 1
+# Pages 左侧导航的合法标签页，需与前端 TAB_VALUES 保持一致。
+PAGE_TABS = {"pipeline", "templates", "selfie", "history", "settings"}
+
+
+def format_size(num_bytes: Any) -> str:
+    """把字节数格式化为可读体积，规则与 Pages 前端的 formatBytes 保持一致。"""
+    try:
+        value = max(0.0, float(num_bytes or 0))
+    except (TypeError, ValueError):
+        value = 0.0
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{int(round(value))} B" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
 
 
 class ImageHistoryCache:
@@ -131,7 +146,7 @@ class ImageHistoryCache:
             if cleanup["deleted_count"]:
                 logger.info(
                     "[FreeImage Cache] 自动清理缓存：删除 "
-                    f"{cleanup['deleted_count']} 张，释放 {cleanup['deleted_bytes']} bytes。"
+                    f"{cleanup['deleted_count']} 张，释放 {format_size(cleanup['deleted_bytes'])}。"
                 )
 
             return {"record": record, "cache_entries": cache_entries, "cleanup": cleanup}
@@ -141,7 +156,7 @@ class ImageHistoryCache:
             result = self._cleanup_cache_locked(reason=reason, clear_all=True)
             logger.info(
                 f"[FreeImage Cache] 已清理全部缓存：删除 {result['deleted_count']} 张，"
-                f"释放 {result['deleted_bytes']} bytes。"
+                f"释放 {format_size(result['deleted_bytes'])}。"
             )
             return result
 
@@ -160,7 +175,7 @@ class ImageHistoryCache:
             if result["deleted_count"]:
                 logger.info(
                     "[FreeImage Cache] 已删除单张缓存："
-                    f"{target_id}，释放 {result['deleted_bytes']} bytes。"
+                    f"{target_id}，释放 {format_size(result['deleted_bytes'])}。"
                 )
             return result
 
@@ -170,7 +185,7 @@ class ImageHistoryCache:
             if result["deleted_count"]:
                 logger.info(
                     "[FreeImage Cache] 缓存限制清理：删除 "
-                    f"{result['deleted_count']} 张，释放 {result['deleted_bytes']} bytes。"
+                    f"{result['deleted_count']} 张，释放 {format_size(result['deleted_bytes'])}。"
                 )
             return result
 
@@ -375,7 +390,7 @@ class ImageHistoryCache:
                     prefs["history_page_size"] = page_size
             if "last_tab" in updates:
                 last_tab = str(updates.get("last_tab") or "").strip()
-                if last_tab in {"pipeline", "templates", "selfie", "history"}:
+                if last_tab in PAGE_TABS:
                     prefs["last_tab"] = last_tab
             self._set_prefs_for_user(username, prefs)
             self._save_page_prefs()
@@ -671,7 +686,7 @@ class ImageHistoryCache:
             history_page_size if history_page_size in {10, 20, 50, 100} else 20
         )
         last_tab = str(prefs.get("last_tab") or "").strip()
-        prefs["last_tab"] = last_tab if last_tab in {"pipeline", "templates", "selfie", "history"} else "pipeline"
+        prefs["last_tab"] = last_tab if last_tab in PAGE_TABS else "pipeline"
         return prefs
 
     def _set_prefs_for_user(self, username: str | None, prefs: dict[str, Any]) -> None:

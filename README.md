@@ -22,6 +22,7 @@
 | LLM 工具 | 注册 `image_generation` 工具，允许模型在对话中主动调用生图能力。 |
 | 人设自拍 | 配置好自拍人设后，支持 `#自拍` 命令和 `send_selfie` LLM 工具，让机器人用固定形象出镜。 |
 | QQ 优化 | 群聊简洁模式可贴表情，成功后只发送图片；也支持引用回复和多图分条策略。 |
+| 插件控制台 | AstrBot Pages 内提供管线、模板、自拍、统计和设置页面，与 WebUI 修改插件配置等价。 |
 
 ## 安装与配置
 
@@ -308,7 +309,7 @@ Provider 行为说明：
 │  ├─ openai_compat_chat.py        # OpenAI Chat Completions 兼容端点
 │  └─ generic.py                   # SiliconFlow / BigModel 等通用图片接口
 ├─ pages/                          # AstrBot Pages 页面资源
-│  └─ 插件配置/                    # 插件配置、统计、缓存和自拍管理页面
+│  └─ 插件配置/                    # 管线、模板、自拍、统计缓存和设置页面
 ├─ .astrbot-plugin/                # AstrBot 插件附加元数据
 ├─ _conf_schema.json               # AstrBot WebUI 配置项定义
 ├─ metadata.yaml                   # 插件元数据

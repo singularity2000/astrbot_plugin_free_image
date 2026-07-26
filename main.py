@@ -37,12 +37,15 @@ from .workflow import ImageWorkflow
 
 PLUGIN_NAME = "astrbot_plugin_free_image"
 
+# Pages「设置」页承载的配置分组。管线、模板、缓存、自拍各有专属页面，不放这里。
+SETTINGS_GROUPS = ("general", "access_control", "quota", "checkin", "llm_tools")
+
 
 @register(
     PLUGIN_NAME,
     "Singularity2000",
     "文生图、图生图，可自定义提示词模板，兼容多种端点",
-    "3.5.3",
+    "3.5.4",
     "https://github.com/singularity2000/astrbot_plugin_free_image",
 )
 class ImageGenerationPlugin(Star):
@@ -136,6 +139,7 @@ class ImageGenerationPlugin(Star):
             ("save_pipeline", self.page_save_pipeline, ["POST"], "保存 FreeImage API 管线"),
             ("save_templates", self.page_save_templates, ["POST"], "保存 FreeImage 提示词模板"),
             ("save_cache_config", self.page_save_cache_config, ["POST"], "保存 FreeImage 缓存配置"),
+            ("save_settings", self.page_save_settings, ["POST"], "保存 FreeImage 通用设置"),
             ("save_config_bundle", self.page_save_config_bundle, ["POST"], "统一保存 FreeImage Pages 配置"),
             ("set_cache_enabled", self.page_set_cache_enabled, ["POST"], "切换 FreeImage 缓存开关"),
             ("get_history", self.page_get_history, ["GET"], "获取 FreeImage 生图历史"),
@@ -267,6 +271,88 @@ class ImageGenerationPlugin(Star):
             style["enabled"] = bool(item.get("enabled", True))
             styles.append(style)
         return styles
+
+    def _settings_schema(self) -> dict[str, Any]:
+        """设置页需要的 schema 分组，键名与 _conf_schema.json 顶层保持一致。"""
+        schema = self._load_conf_schema()
+        result: dict[str, Any] = {}
+        for group in SETTINGS_GROUPS:
+            entry = schema.get(group, {})
+            if isinstance(entry, dict) and isinstance(entry.get("items"), dict):
+                result[group] = entry
+        return result
+
+    def _settings_for_page(self) -> dict[str, dict[str, Any]]:
+        """按 schema 逐字段取当前值，缺失时用 schema 默认值补齐。"""
+        result: dict[str, dict[str, Any]] = {}
+        for group, entry in self._settings_schema().items():
+            current = self.conf.get(group, {})
+            current = current if isinstance(current, dict) else {}
+            values: dict[str, Any] = {}
+            for key, field in entry.get("items", {}).items():
+                if not isinstance(field, dict):
+                    continue
+                values[key] = current.get(key, field.get("default"))
+            result[group] = values
+        return result
+
+    def _coerce_setting_value(self, field: dict[str, Any], value: Any, fallback: Any) -> Any:
+        """按 schema 声明的类型强制转换，转换失败时回退到当前值。"""
+        field_type = str(field.get("type") or "string")
+        if field_type == "bool":
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on"}
+            return bool(value)
+        if field_type in ("int", "float"):
+            try:
+                number = float(str(value).strip() or 0)
+            except (TypeError, ValueError):
+                return fallback
+            return int(number) if field_type == "int" else number
+        if field_type == "list":
+            return self._normalize_str_list(value)
+        if field_type == "object":
+            if isinstance(value, dict):
+                return dict(value)
+            return dict(fallback) if isinstance(fallback, dict) else {}
+        text = "" if value is None else str(value)
+        options = field.get("options")
+        if isinstance(options, list) and options and text not in [str(item) for item in options]:
+            logger.warning(f"[FreeImage Pages] 忽略非法配置值: {field.get('description', '')}={text!r}")
+            return fallback
+        return text
+
+    def _normalize_settings(self, raw_settings: Any) -> dict[str, dict[str, Any]]:
+        """只接受 schema 中声明过的分组和字段，其余一律丢弃。"""
+        if not isinstance(raw_settings, dict):
+            return {}
+        result: dict[str, dict[str, Any]] = {}
+        for group, entry in self._settings_schema().items():
+            payload = raw_settings.get(group)
+            if not isinstance(payload, dict):
+                continue
+            current = self.conf.get(group, {})
+            current = current if isinstance(current, dict) else {}
+            values: dict[str, Any] = {}
+            for key, field in entry.get("items", {}).items():
+                if not isinstance(field, dict) or key not in payload:
+                    continue
+                fallback = current.get(key, field.get("default"))
+                values[key] = self._coerce_setting_value(field, payload.get(key), fallback)
+            if values:
+                result[group] = values
+        return result
+
+    def _apply_settings(self, raw_settings: Any) -> list[str]:
+        """写入设置分组，返回实际发生写入的分组名，供前端提示。"""
+        applied: list[str] = []
+        for group, values in self._normalize_settings(raw_settings).items():
+            group_conf = self.conf.setdefault(group, {})
+            if not isinstance(group_conf, dict):
+                continue
+            group_conf.update(values)
+            applied.append(group)
+        return applied
 
     def _persona_preview_url(self, path_str: str) -> str:
         return f"/api/plug/{PLUGIN_NAME}/get_image?persona_path={quote(path_str, safe='')}"
@@ -405,6 +491,7 @@ class ImageGenerationPlugin(Star):
                 "personas": self._personas_for_page(),
                 "styles": selfie_conf.get("selfie_styles", []) or [],
             },
+            "settings": self._settings_for_page(),
             "page_prefs": {
                 "theme": str(page_prefs.get("theme") or "system"),
                 "cache_page_size": self._page_pref_int(page_prefs, "cache_page_size", 24),
@@ -429,6 +516,7 @@ class ImageGenerationPlugin(Star):
                     "selfie": selfie_schema,
                     "selfie_personas": selfie_items.get("selfie_personas", {}),
                     "selfie_styles": selfie_items.get("selfie_styles", {}),
+                    "settings": self._settings_schema(),
                 },
             }
         )
@@ -468,6 +556,10 @@ class ImageGenerationPlugin(Star):
             cache_conf["image_cache_max_count"] = str(cache_payload.get("max_count") or "").strip()
             saved_sections.append("cache")
             cache_changed = True
+
+        if isinstance(payload.get("settings"), dict):
+            if self._apply_settings(payload.get("settings")):
+                saved_sections.append("settings")
 
         if isinstance(payload.get("selfie"), dict):
             selfie_payload = payload.get("selfie") or {}
@@ -544,6 +636,16 @@ class ImageGenerationPlugin(Star):
         await self.save_config_and_refresh_runtime()
         cleanup = await self.history_cache.enforce_limits(reason="config")
         return jsonify({"success": True, "message": "缓存配置已保存。", "cleanup": cleanup})
+
+    async def page_save_settings(self):
+        payload = await request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"success": False, "message": "请求体必须是 JSON 对象。"}), 400
+        applied = self._apply_settings(payload.get("settings", payload))
+        if not applied:
+            return jsonify({"success": True, "message": "没有需要保存的设置。", "saved_groups": []})
+        await self.save_config_and_refresh_runtime()
+        return jsonify({"success": True, "message": "设置已保存。", "saved_groups": applied})
 
     async def page_set_cache_enabled(self):
         payload = await request.get_json(silent=True)
@@ -1344,7 +1446,7 @@ class ImageGenerationPlugin(Star):
         if style_id_override and not style:
             logger.warning(f"[Selfie] 找不到自拍风格「{style_id_override}」，将以无风格继续生成。")
 
-        prompt = build_selfie_prompt(persona, action, style, bool(extra_images))
+        prompt = build_selfie_prompt(persona, action, style)
         persona_name = persona.get("name", persona.get("id", ""))
         style_name = style.get("name", "") if style else "无风格"
         logger.info(f"[Selfie] 人设={persona_name}, 风格={style_name}, 参考图={len(images_to_send)}张（人设{len(persona_images)}张，额外{len(extra_images)}张）")

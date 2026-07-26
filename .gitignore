@@ -208,3 +208,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# AstrBot 运行时目录
+#  在插件目录下直接运行/导入 AstrBot 核心时，会在当前工作目录生成 data/（cmd_config.json、t2i_templates 等），
+#  属于框架产物，不应进入插件仓库。
+data/
