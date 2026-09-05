@@ -14,6 +14,21 @@
                         "default": true,
                         "hint": "关闭后此节点将被跳过"
                     },
+                    "capabilities": {
+                        "description": "模型能力",
+                        "type": "list",
+                        "default": [
+                            "text2image",
+                            "image2image"
+                        ],
+                        "options": [
+                            "text2image",
+                            "image2image",
+                            "text2video",
+                            "image2video"
+                        ],
+                        "hint": "勾选此节点支持的生成模态。当前视频模态仅作为管线能力预留，视频接口将在后续版本适配。"
+                    },
                     "model": {
                         "description": "模型名称",
                         "type": "string",
@@ -132,6 +147,21 @@
                         "default": true,
                         "hint": "关闭后此节点将被跳过"
                     },
+                    "capabilities": {
+                        "description": "模型能力",
+                        "type": "list",
+                        "default": [
+                            "text2image",
+                            "image2image"
+                        ],
+                        "options": [
+                            "text2image",
+                            "image2image",
+                            "text2video",
+                            "image2video"
+                        ],
+                        "hint": "勾选此节点支持的生成模态。当前视频模态仅作为管线能力预留，视频接口将在后续版本适配。"
+                    },
                     "api_url": {
                         "description": "API 地址",
                         "type": "string",
@@ -208,6 +238,21 @@
                         "default": true,
                         "hint": "关闭后此节点将被跳过"
                     },
+                    "capabilities": {
+                        "description": "模型能力",
+                        "type": "list",
+                        "default": [
+                            "text2image",
+                            "image2image"
+                        ],
+                        "options": [
+                            "text2image",
+                            "image2image",
+                            "text2video",
+                            "image2video"
+                        ],
+                        "hint": "勾选此节点支持的生成模态。当前视频模态仅作为管线能力预留，视频接口将在后续版本适配。"
+                    },
                     "api_url": {
                         "description": "API 地址",
                         "type": "string",
@@ -272,6 +317,21 @@
                         "default": true,
                         "hint": "关闭后此节点将被跳过"
                     },
+                    "capabilities": {
+                        "description": "模型能力",
+                        "type": "list",
+                        "default": [
+                            "text2image",
+                            "image2image"
+                        ],
+                        "options": [
+                            "text2image",
+                            "image2image",
+                            "text2video",
+                            "image2video"
+                        ],
+                        "hint": "勾选此节点支持的生成模态。当前视频模态仅作为管线能力预留，视频接口将在后续版本适配。"
+                    },
                     "api_url": {
                         "description": "API 地址",
                         "type": "string",
@@ -330,6 +390,21 @@
                         "default": true,
                         "hint": "关闭后此节点将被跳过"
                     },
+                    "capabilities": {
+                        "description": "模型能力",
+                        "type": "list",
+                        "default": [
+                            "text2image",
+                            "image2image"
+                        ],
+                        "options": [
+                            "text2image",
+                            "image2image",
+                            "text2video",
+                            "image2video"
+                        ],
+                        "hint": "勾选此节点支持的生成模态。当前视频模态仅作为管线能力预留，视频接口将在后续版本适配。"
+                    },
                     "api_url": {
                         "description": "API 地址",
                         "type": "string",
@@ -382,6 +457,21 @@
                         "default": true,
                         "hint": "关闭后此节点将被跳过"
                     },
+                    "capabilities": {
+                        "description": "模型能力",
+                        "type": "list",
+                        "default": [
+                            "text2image",
+                            "image2image"
+                        ],
+                        "options": [
+                            "text2image",
+                            "image2image",
+                            "text2video",
+                            "image2video"
+                        ],
+                        "hint": "勾选此节点支持的生成模态。当前视频模态仅作为管线能力预留，视频接口将在后续版本适配。"
+                    },
                     "api_url": {
                         "description": "API 地址",
                         "type": "string",
@@ -433,6 +523,21 @@
                         "type": "bool",
                         "default": true,
                         "hint": "关闭后此节点将被跳过"
+                    },
+                    "capabilities": {
+                        "description": "模型能力",
+                        "type": "list",
+                        "default": [
+                            "text2image",
+                            "image2image"
+                        ],
+                        "options": [
+                            "text2image",
+                            "image2image",
+                            "text2video",
+                            "image2video"
+                        ],
+                        "hint": "勾选此节点支持的生成模态。当前视频模态仅作为管线能力预留，视频接口将在后续版本适配。"
                     },
                     "api_url": {
                         "description": "API 地址",

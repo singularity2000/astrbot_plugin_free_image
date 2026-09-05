@@ -69,9 +69,10 @@ class CommandHandlers:
 
         lines.append("")
         if is_admin:
-            lines.append("画图模型 置顶 <序号> 将该模型置顶到管线顶部")
-            lines.append("画图模型 开启/关闭 <序号> 将该模型启用或关闭")
-        lines.append("文生图-<序号> 指定单个模型生图（图生图、模板、自拍同理）")
+            lines.append("画图模型 置顶 序号 将该模型置顶到管线顶部")
+            lines.append("画图模型 开启/关闭 序号 将该模型启用或关闭")
+        lines.append("文生图-序号 指定单个模型生图（图生图、模板、自拍同理）")
+        lines.append("文生视频/图生视频：敬请期待")
         return "\n".join(lines)
 
     @staticmethod
@@ -211,7 +212,7 @@ class CommandHandlers:
                 async for res in p.handle_image_gen_logic(
                     event, remaining, is_i2i=False,
                     request_source="command", model_index=model_index,
-                    generation_mode="text2img",
+                    generation_mode="text2image",
                 ):
                     yield res
                 event.stop_event()
@@ -227,7 +228,7 @@ class CommandHandlers:
                 async for res in p.handle_image_gen_logic(
                     event, remaining, is_i2i=True,
                     request_source="command", model_index=model_index,
-                    generation_mode="image2img",
+                    generation_mode="image2image",
                 ):
                     yield res
                 event.stop_event()
@@ -251,7 +252,7 @@ class CommandHandlers:
                 async for res in p.handle_image_gen_logic(
                     event, user_prompt, is_i2i=True,
                     display_name=display_name, request_source="command",
-                    model_index=model_index, generation_mode="template",
+                    model_index=model_index, generation_mode="image2image",
                 ):
                     yield res
                 event.stop_event()
@@ -279,7 +280,7 @@ class CommandHandlers:
             is_i2i=True,
             display_name=display_cmd,
             request_source="command",
-            generation_mode="template",
+            generation_mode="image2image",
         ):
             yield res
         event.stop_event()
@@ -293,7 +294,7 @@ class CommandHandlers:
             yield p._quoted_plain_result(event, "请提供文生图的描述。用法: #文生图 <描述>")
             return
         async for res in p.handle_image_gen_logic(
-            event, prompt, is_i2i=False, request_source="command", generation_mode="text2img"
+            event, prompt, is_i2i=False, request_source="command", generation_mode="text2image"
         ):
             yield res
         event.stop_event()
@@ -309,7 +310,7 @@ class CommandHandlers:
             )
             return
         async for res in p.handle_image_gen_logic(
-            event, prompt, is_i2i=True, request_source="command", generation_mode="image2img"
+            event, prompt, is_i2i=True, request_source="command", generation_mode="image2image"
         ):
             yield res
         event.stop_event()
@@ -448,9 +449,9 @@ class CommandHandlers:
         if not keyword:
             msg = "图生图预设指令: \n"
             msg += "、".join(p.prompt_map.keys())
-            msg += "\n\n#画图帮助 <预设指令> 来查看对应模板的详细内容"
-            msg += "\n\n生图指令: \n#文生图 <你的描述> \n#图生图 <你的描述>（发送图片 或 引用图片 或 @用户,若为空则使用你的头像）"
-            msg += "\n#预设指令 + 发送图片 或 引用图片 或 @用户 来使用模板图生图"
+            msg += "\n\n/画图帮助 预设名 来查看对应模板的详细内容"
+            msg += "\n\n生图指令: \n/文生图 你的描述 \n/图生图 你的描述（发送图片 或 引用图片 或 @用户,若为空则使用你的头像）"
+            msg += "\n/预设指令 + 发送图片 或 引用图片 或 @用户 来使用模板图生图"
             yield event.plain_result(msg)
             return
         prompt = p.prompt_map.get(keyword)

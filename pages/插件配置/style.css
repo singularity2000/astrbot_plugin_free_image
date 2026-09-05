@@ -1496,3 +1496,28 @@ label {
     padding: 12px;
   }
 }
+
+/* 管线节点摘要：一行紧凑展示地址、重试与能力，适配窄屏。 */
+.node-summary {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent, #5f8f68) !important;
+  font-size: 0.78rem;
+}
+.capability-checklist {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 8px 0;
+}
+
+.image-tile { transition: opacity 180ms ease, transform 180ms ease; }
+.image-tile.is-removing { opacity: 0; transform: scale(.94); pointer-events: none; }
+
+.node-title .title-text { display: block; min-width: 0; }
+.node-title .title-text strong { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.node-title .node-summary { display: block; width: 100%; min-width: 0; margin-top: 3px; }
+@media (max-width: 720px) { .node-title .node-summary { font-size: .72rem; } }

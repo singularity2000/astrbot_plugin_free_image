@@ -20,6 +20,8 @@ const SETTINGS_SECTION_PREFIX = "settings:";
 const DEFAULT_THEME = "system";
 const DEFAULT_CACHE_PAGE_SIZE = 24;
 const DEFAULT_HISTORY_PAGE_SIZE = 20;
+const CAPABILITY_LABELS = { text2image: "文生图", image2image: "图生图", text2video: "文生视频", image2video: "图生视频" };
+const previewMemoryCache = new Map();
 
 let memoryStorageFallback = {};
 let sortIdentityCounter = 0;
@@ -295,8 +297,8 @@ function formatDate(value) {
 
 function modeLabel(mode) {
   return ({
-    text2img: "文生图",
-    image2img: "图生图",
+    text2image: "文生图",
+    image2image: "图生图",
     template: "模板",
     selfie: "自拍",
     video: "视频",
@@ -366,6 +368,8 @@ function imageDataParams(item, { thumbnail = false } = {}) {
 
 async function ensureImageDataUrl(item, { thumbnail = false } = {}) {
   if (!item) return "";
+  const cacheKey = thumbnail && item.id ? `thumb:${item.id}` : (!thumbnail && item.id ? `full:${item.id}` : "");
+  if (cacheKey && previewMemoryCache.has(cacheKey)) return previewMemoryCache.get(cacheKey);
   if (thumbnail && item.thumb_data_url) return item.thumb_data_url;
   if (!thumbnail && item.data_url) return item.data_url;
   const params = imageDataParams(item, { thumbnail });
@@ -379,6 +383,7 @@ async function ensureImageDataUrl(item, { thumbnail = false } = {}) {
     if (result?.success !== false && result?.data_url) {
       if (thumbnail) item.thumb_data_url = result.data_url;
       else item.data_url = result.data_url;
+      if (cacheKey) previewMemoryCache.set(cacheKey, result.data_url);
       return result.data_url;
     }
   } catch (error) {
@@ -567,6 +572,10 @@ function createPipelineNode(templateKey) {
 function fieldControlHtml(section, index, key, field, value) {
   const type = field?.type || "string";
   const baseAttrs = `data-bind="${section}" data-index="${index}" data-key="${escapeHtml(key)}" data-type="${escapeHtml(type)}"`;
+  if (key === "capabilities") {
+    const selected = new Set(Array.isArray(value) ? value : ["text2image", "image2image"]);
+    return `<div class="capability-checklist" data-bind="${section}" data-index="${index}" data-key="capabilities" data-type="capabilities">${Object.entries(CAPABILITY_LABELS).map(([cap, label]) => `<label class="inline-check"><input type="checkbox" data-capability-value="${cap}" ${selected.has(cap) ? "checked" : ""} /><span>${label}</span></label>`).join("")}</div>`;
+  }
   if (field?.options?.length) {
     const options = [...field.options];
     if (value && !options.includes(value)) options.unshift(value);
@@ -609,7 +618,18 @@ function fieldHtml(section, index, key, field, value) {
   `;
 }
 
+function updateBoundValueByParts(section, index, key, value) {
+  if (section === "pipeline" && state.pipeline[index]) { state.pipeline[index][key] = value; markDirty("pipeline"); }
+  else if (section.startsWith(SETTINGS_SECTION_PREFIX)) { const group = section.slice(SETTINGS_SECTION_PREFIX.length); if (!state.settings[group]) state.settings[group] = {}; state.settings[group][key] = value; markDirty("settings"); }
+}
+
 function updateBoundValue(input) {
+  if (input.dataset.type === "capabilities") {
+    const index = Number(input.dataset.index);
+    updateBoundValueByParts(input.dataset.bind, index, "capabilities", [...input.querySelectorAll("input[data-capability-value]:checked")].map((item) => item.dataset.capabilityValue));
+    if (input.dataset.bind === "pipeline") refreshPipelineNodeSummary(index);
+    return;
+  }
   const section = input.dataset.bind || "";
   const index = Number(input.dataset.index);
   const key = input.dataset.key;
@@ -639,6 +659,9 @@ function updateBoundValue(input) {
   if (section === "pipeline" && state.pipeline[index]) {
     state.pipeline[index][key] = value;
     markDirty("pipeline");
+    if (["enabled", "model", "max_retry", "api_url", "vertex_ai_base_api", "recaptcha_base_api"].includes(key)) {
+      refreshPipelineNodeSummary(index);
+    }
   }
   if (section === "style" && state.selfie.styles[index]) {
     state.selfie.styles[index][key] = value;
@@ -754,6 +777,25 @@ function bindSortable(container, type) {
   });
 }
 
+function pipelineSummaryText(node) {
+  const status = node.enabled === false ? "已关闭" : "启用中";
+  const model = node.model || node.__template_key || "";
+  const capabilities = Array.isArray(node.capabilities) && node.capabilities.length ? node.capabilities : ["text2image", "image2image"];
+  const capabilityText = capabilities.map((item) => CAPABILITY_LABELS[item] || item).join(" · ");
+  const apiUrl = String(node.api_url || node.vertex_ai_base_api || node.recaptcha_base_api || "").trim();
+  return [status, model, `重试 ${node.max_retry ?? 3}`, capabilityText, apiUrl || "未配置地址"].join("  ·  ");
+}
+
+function refreshPipelineNodeSummary(index) {
+  const node = state.pipeline[index];
+  const card = byId("pipeline-list")?.querySelector(`[data-index="${index}"]`);
+  const summary = node && card?.querySelector(".node-summary");
+  if (!summary) return;
+  const text = pipelineSummaryText(node);
+  summary.textContent = text;
+  summary.title = text;
+}
+
 function renderPipeline() {
   const list = byId("pipeline-list");
   if (!list) return;
@@ -766,7 +808,7 @@ function renderPipeline() {
     const meta = getTemplateMeta(key);
     const expanded = state.expandedPipeline.has(index);
     const model = node.model || key;
-    const status = node.enabled === false ? "已关闭" : "启用中";
+    const summary = pipelineSummaryText(node);
     const knownFields = meta.items || {};
     const compatFields = Object.fromEntries(
       Object.entries(node)
@@ -787,7 +829,7 @@ function renderPipeline() {
             <span class="node-index">${index + 1}</span>
             <div class="title-text">
               <strong>${escapeHtml(meta.name || key)}</strong>
-              <small>${escapeHtml(model)} · ${escapeHtml(status)}</small>
+              <small class="node-summary" title="${escapeHtml(summary)}">${escapeHtml(summary)}</small>
             </div>
           </div>
           <div class="node-actions">
@@ -1814,6 +1856,11 @@ async function deleteCacheImage(cacheId) {
     cache_id: image.id,
   }));
   if (result?.success === false) return;
+  const deletingCard = byId("cache-grid")?.querySelector(`[data-cache-id="${CSS.escape(String(image.id))}"]`);
+  deletingCard?.classList.add("is-removing");
+  await new Promise((resolve) => setTimeout(resolve, 180));
+  previewMemoryCache.delete(`thumb:${image.id}`);
+  previewMemoryCache.delete(`full:${image.id}`);
   await loadCache();
   await loadHistory();
   showToast("缓存图片已删除。");

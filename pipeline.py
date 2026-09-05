@@ -57,6 +57,7 @@ class ImageGenPipeline:
         image_bytes_list: List[bytes],
         prompt: str,
         model_index: Optional[int] = None,
+        generation_mode: Optional[str] = None,
     ) -> tuple[Union[bytes, list[bytes], str, dict[str, str]], Optional[str]]:
         """
         依次调用管线中已启用的 Provider。
@@ -78,6 +79,11 @@ class ImageGenPipeline:
                     f"模型 {model_index}🔴{node_display_name(provider.node)} 已关闭，请选择其他模型。",
                     None,
                 )
+            if not provider.supports_capability(generation_mode):
+                return (
+                    f"模型 {model_index} 不支持{self._capability_label(generation_mode)}，请指定其他模型。",
+                    None,
+                )
             logger.info(f"[Pipeline] 指定模型: {provider.log_label}")
             result = await provider.generate(image_bytes_list, prompt)
             if isinstance(result, (bytes, list, dict)):
@@ -87,7 +93,7 @@ class ImageGenPipeline:
 
         errors: List[str] = []
         for provider in self.providers:
-            if not provider.enabled:
+            if not provider.enabled or not provider.supports_capability(generation_mode):
                 continue
             logger.info(f"[Pipeline] 尝试: {provider.log_label}")
             result = await provider.generate(image_bytes_list, prompt)
@@ -104,6 +110,10 @@ class ImageGenPipeline:
                 None,
             )
         return "所有 API 均失败:\n" + "\n".join(errors), None
+
+    @staticmethod
+    def _capability_label(capability: Optional[str]) -> str:
+        return {"text2image": "文生图", "image2image": "图生图", "text2video": "文生视频", "image2video": "图生视频"}.get(capability or "", "当前模态")
 
     async def close(self):
         """关闭所有 Provider 的资源。"""

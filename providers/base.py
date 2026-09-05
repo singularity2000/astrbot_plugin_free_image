@@ -105,6 +105,17 @@ class BaseProvider(ABC):
         return self.node.get("enabled", True)
 
     @property
+    def capabilities(self) -> set[str]:
+        """节点声明的生成能力；旧配置默认保持原有图像能力。"""
+        raw = self.node.get("capabilities")
+        if not isinstance(raw, list):
+            return {"text2image", "image2image"}
+        return {str(item).strip() for item in raw if str(item).strip()}
+
+    def supports_capability(self, capability: str | None) -> bool:
+        return not capability or capability in self.capabilities
+
+    @property
     def max_retry(self) -> int:
         return self.node.get("max_retry", 3)
 

@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import base64
 from io import BytesIO
 import json
@@ -44,8 +44,8 @@ SETTINGS_GROUPS = ("general", "access_control", "quota", "checkin", "llm_tools")
 @register(
     PLUGIN_NAME,
     "Singularity2000",
-    "文生图、图生图，可自定义提示词模板，兼容多种端点",
-    "3.5.4",
+    "文生图、图生图，可自定义模型能力与提示词模板，兼容多种端点",
+    "3.6.0",
     "https://github.com/singularity2000/astrbot_plugin_free_image",
 )
 class ImageGenerationPlugin(Star):
@@ -858,7 +858,7 @@ class ImageGenerationPlugin(Star):
                     is_i2i=is_i2i,
                     request_source="llm_tool",
                     count=count,
-                    generation_mode="image2img" if is_i2i else "text2img",
+                    generation_mode="image2image" if is_i2i else "text2image",
                 ):
                     await self._send_with_auto_quote(event, result, request_source="llm_tool")
             except Exception as e:
@@ -874,15 +874,23 @@ class ImageGenerationPlugin(Star):
         async for res in self.commands.on_image_gen_request(event):
             yield res
 
-    @filter.command("文生图", prefix_optional=True)
+    @filter.command("文生图", prefix_optional=True, desc="根据文字描述生成图片。示例：文生图 一位在霓虹灯下的赛博朋克少女。")
     async def on_text_to_image_request(self, event: AstrMessageEvent):
         async for res in self.commands.on_text_to_image_request(event):
             yield res
 
-    @filter.command("图生图", prefix_optional=True)
+    @filter.command("图生图", prefix_optional=True, desc="根据图片和文字描述修改或重绘图片。示例：发送图片后输入 图生图 改成油画风格。")
     async def on_image_to_image_request(self, event: AstrMessageEvent):
         async for res in self.commands.on_image_to_image_request(event):
             yield res
+
+    @filter.command("文生视频", prefix_optional=True, desc="预留文生视频命令，当前版本暂未适配。示例：文生视频 海边日落延时镜头。")
+    async def on_text_to_video_request(self, event: AstrMessageEvent):
+        yield event.plain_result("文生视频功能正在准备中，当前版本暂未适配视频提供商。")
+
+    @filter.command("图生视频", prefix_optional=True, desc="预留图生视频命令，当前版本暂未适配。示例：发送图片后输入 图生视频 让画面动起来。")
+    async def on_image_to_video_request(self, event: AstrMessageEvent):
+        yield event.plain_result("图生视频功能正在准备中，当前版本暂未适配视频提供商。")
 
     def _should_auto_quote(self, event: AstrMessageEvent) -> bool:
         """已废弃：保留方法体以兼容潜在的外部调用。
@@ -1035,7 +1043,7 @@ class ImageGenerationPlugin(Star):
         quota_conf = self.conf.get("quota", {})
         concise_mode = general_conf.get("concise_mode", False) and bool(group_id)
         start_msg = f"🎨 收到{'图生图' if is_i2i else '文生图'}请求，正在生成 [{display_name}]..."
-        generation_mode = generation_mode or ("image2img" if is_i2i else "text2img")
+        generation_mode = generation_mode or ("image2image" if is_i2i else "text2image")
 
         if concise_mode:
             logger.info(start_msg)
@@ -1118,7 +1126,7 @@ class ImageGenerationPlugin(Star):
 
             start_time = datetime.now()
             res, model_name = await self.pipeline.execute(
-                images_to_process, prompt, model_index=model_index
+                images_to_process, prompt, model_index=model_index, generation_mode=generation_mode
             )
             elapsed = (datetime.now() - start_time).total_seconds()
 
@@ -1155,7 +1163,7 @@ class ImageGenerationPlugin(Star):
 
             start_time = datetime.now()
             res, model_name = await self.pipeline.execute(
-                images_to_process, prompt, model_index=model_index
+                images_to_process, prompt, model_index=model_index, generation_mode=generation_mode
             )
             elapsed = (datetime.now() - start_time).total_seconds()
             return ("result", i, suffix, (res, model_name, elapsed))
@@ -1344,27 +1352,27 @@ class ImageGenerationPlugin(Star):
             else:
                 yield self._quoted_plain_result(event, f"❌ 生成失败 ({elapsed:.2f}s)\n原因: {res}{suffix}")
 
-    @filter.command("画图添加模板", aliases={"lma", "lm添加"}, prefix_optional=True)
+    @filter.command("画图添加模板", aliases={"lma", "lm添加"}, prefix_optional=True, desc="管理员新增提示词模板。格式：画图添加模板 触发词:提示词；示例：画图添加模板 手办化:制作一张手办展示图。")
     async def add_lm_prompt(self, event: AstrMessageEvent):
         async for res in self.commands.add_lm_prompt(event):
             yield res
 
-    @filter.command("画图模型", prefix_optional=True)
+    @filter.command("画图模型", prefix_optional=True, desc="查看或管理图片生成 API 管线。示例：画图模型、画图模型 置顶 2。")
     async def on_model_pipeline_command(self, event: AstrMessageEvent):
         async for result in self.commands.on_model_pipeline_command(event):
             yield result
 
-    @filter.command("画图缓存", prefix_optional=True)
+    @filter.command("画图缓存", prefix_optional=True, desc="查看、开启、关闭或清理图片缓存。示例：画图缓存 状态、画图缓存 清理。")
     async def on_image_cache_command(self, event: AstrMessageEvent):
         async for res in self.commands.on_image_cache_command(event):
             yield res
 
-    @filter.command("画图简洁模式", prefix_optional=True)
+    @filter.command("画图简洁模式", prefix_optional=True, desc="开启或关闭群聊生图简洁模式。示例：画图简洁模式 开启。")
     async def on_concise_mode_command(self, event: AstrMessageEvent):
         async for res in self.commands.on_concise_mode_command(event):
             yield res
 
-    @filter.command("画图帮助", aliases={"lmh", "lm帮助"}, prefix_optional=True)
+    @filter.command("画图帮助", aliases={"lmh", "lm帮助"}, prefix_optional=True, desc="查看模板和生图命令帮助。示例：画图帮助、画图帮助 手办化。")
     async def on_prompt_help(self, event: AstrMessageEvent):
         async for res in self.commands.on_prompt_help(event):
             yield res
@@ -1373,22 +1381,22 @@ class ImageGenerationPlugin(Star):
         admin_ids = self.context.get_config().get("admins_id", [])
         return event.get_sender_id() in admin_ids
 
-    @filter.command("画图签到", prefix_optional=True)
+    @filter.command("画图签到", prefix_optional=True, desc="签到领取个人永久生图次数。示例：画图签到。")
     async def on_checkin(self, event: AstrMessageEvent):
         async for res in self.commands.on_checkin(event):
             yield res
 
-    @filter.command("画图增加用户次数", prefix_optional=True)
+    @filter.command("画图增加用户次数", prefix_optional=True, desc="管理员为指定用户增加永久生图次数。示例：画图增加用户次数 @某人 10。")
     async def on_add_user_counts(self, event: AstrMessageEvent):
         async for res in self.commands.on_add_user_counts(event):
             yield res
 
-    @filter.command("画图增加群组次数", prefix_optional=True)
+    @filter.command("画图增加群组次数", prefix_optional=True, desc="管理员为指定群组增加永久生图次数。示例：画图增加群组次数 987654 50。")
     async def on_add_group_counts(self, event: AstrMessageEvent):
         async for res in self.commands.on_add_group_counts(event):
             yield res
 
-    @filter.command("画图查询次数", prefix_optional=True)
+    @filter.command("画图查询次数", prefix_optional=True, desc="查询用户或群组的剩余生图次数。示例：画图查询次数、画图查询次数 @某人。")
     async def on_query_counts(self, event: AstrMessageEvent):
         async for res in self.commands.on_query_counts(event):
             yield res
@@ -1552,7 +1560,7 @@ class ImageGenerationPlugin(Star):
 
                 start_time = datetime.now()
                 res, model_name = await self.pipeline.execute(
-                    images_to_send, prompt, model_index=model_index
+                    images_to_send, prompt, model_index=model_index, generation_mode="image2image"
                 )
                 elapsed = (datetime.now() - start_time).total_seconds()
 
@@ -1634,7 +1642,7 @@ class ImageGenerationPlugin(Star):
 
         start_time = datetime.now()
         res, model_name = await self.pipeline.execute(
-            images_to_send, prompt, model_index=model_index
+            images_to_send, prompt, model_index=model_index, generation_mode="image2image"
         )
         elapsed = (datetime.now() - start_time).total_seconds()
         return ("result", suffix, (res, model_name, elapsed))
@@ -1655,14 +1663,14 @@ class ImageGenerationPlugin(Star):
         return
         yield  # make it an async generator
 
-    @filter.command("自拍帮助", prefix_optional=True)
+    @filter.command("自拍帮助", prefix_optional=True, desc="查看自拍命令、人设和风格设置。示例：自拍帮助。")
     async def on_selfie_help(self, event: AstrMessageEvent):
         async for res in self.commands.on_selfie_help(event):
             yield res
 
     # ─────────────────────────── #自拍 命令 ───────────────────────────
 
-    @filter.command("自拍", prefix_optional=True)
+    @filter.command("自拍", prefix_optional=True, desc="使用配置好的自拍人设生成机器人自拍。示例：自拍 在便利店门口喝冰咖啡。")
     async def on_selfie_command(self, event: AstrMessageEvent):
         async for res in self.commands.on_selfie_command(event):
             yield res
@@ -1731,14 +1739,14 @@ class ImageGenerationPlugin(Star):
 
     # ─────────────────────────── 人设管理命令 ───────────────────────────
 
-    @filter.command("自拍人设", prefix_optional=True)
+    @filter.command("自拍人设", prefix_optional=True, desc="管理自拍人设和参考图片。示例：自拍人设 列表、自拍人设 添加 yeko 椰子。")
     async def on_selfie_persona_cmd(self, event: AstrMessageEvent):
         async for res in self.commands.on_selfie_persona_cmd(event):
             yield res
 
     # ─────────────────────────── 风格管理命令 ───────────────────────────
 
-    @filter.command("自拍风格", prefix_optional=True)
+    @filter.command("自拍风格", prefix_optional=True, desc="管理自拍风格模板。示例：自拍风格 列表、自拍风格 模式 自动。")
     async def on_selfie_style_cmd(self, event: AstrMessageEvent):
         async for res in self.commands.on_selfie_style_cmd(event):
             yield res
