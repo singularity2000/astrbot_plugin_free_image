@@ -161,7 +161,8 @@ class ImageWorkflow:
         读取优先级保持插件既有设计：引用图 > LLM/框架兜底引用图 > 当前消息图片 > @ 头像 > 发送者头像兜底。
         send_selfie 与 image_generation 通过参数裁剪同一套策略，避免 AstrBot 框架升级后两边行为漂移。
         """
-        bot_id = str(event.get_self_id() or "")
+        bot_id = str(event.get_self_id() or "").strip()
+        filtered_bot_at = False
         at_user_ids: list[str] = []
         reply_images: list[Image] = []
         direct_images: list[Image] = []
@@ -172,8 +173,9 @@ class ImageWorkflow:
             elif isinstance(seg, Image):
                 direct_images.append(seg)
             elif isinstance(seg, At):
-                uid = str(seg.qq)
-                if ignore_bot_at and uid == bot_id:
+                uid = str(seg.qq).strip()
+                if ignore_bot_at and bot_id and uid == bot_id:
+                    filtered_bot_at = True
                     continue
                 at_user_ids.append(uid)
 
@@ -211,22 +213,23 @@ class ImageWorkflow:
                 return avatar_images
 
         # 5. 图生图命令的历史行为：无显式图片时用发送者头像兜底；自拍不启用。
-        if sender_avatar_fallback:
+        # 已明确过滤机器人 @ 时，不把参考对象悄悄改成发送者。
+        if sender_avatar_fallback and not filtered_bot_at:
             if avatar := await self._get_avatar(event.get_sender_id()):
                 return [avatar]
 
         return []
 
     async def get_images(self, event: AstrMessageEvent) -> List[bytes]:
-        """图生图参考图读取。保留发送者头像兜底，并兼容 LLM/引用图解析兜底。"""
+        """图生图取图：直接附图追加 @头像，引用图优先；按配置过滤机器人。"""
         return await self._collect_context_images(
             event,
             include_llm_fallbacks=True,
             include_direct_images=True,
             include_at_avatars=True,
-            append_at_after_explicit=False,
+            append_at_after_explicit=True,
             sender_avatar_fallback=True,
-            ignore_bot_at=False,
+            ignore_bot_at=bool(self.conf.get("general", {}).get("ignore_bot_at_avatar", False)),
         )
 
     async def has_context_images(self, event: AstrMessageEvent) -> bool:

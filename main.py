@@ -45,7 +45,7 @@ SETTINGS_GROUPS = ("general", "access_control", "quota", "checkin", "llm_tools")
     PLUGIN_NAME,
     "Singularity2000",
     "文生图、图生图，可自定义模型能力与提示词模板，兼容多种端点",
-    "3.6.0",
+    "3.7.0",
     "https://github.com/singularity2000/astrbot_plugin_free_image",
 )
 class ImageGenerationPlugin(Star):
@@ -413,12 +413,13 @@ class ImageGenerationPlugin(Star):
         return None
 
     @staticmethod
-    def _page_query_int(key: str, default: int, *, minimum: int = 1, maximum: int = 100) -> int:
+    def _page_query_int(key: str, default: int, *, minimum: int = 1, maximum: int | None = 100) -> int:
         try:
             value = int(request.args.get(key, default))
         except (TypeError, ValueError):
             value = default
-        return max(minimum, min(maximum, value))
+        value = max(minimum, value)
+        return min(maximum, value) if maximum is not None else value
 
     @staticmethod
     def _thumbnail_image_bytes(path: Path, max_side: int = 360) -> tuple[bytes, str]:
@@ -665,7 +666,7 @@ class ImageGenerationPlugin(Star):
             "model": request.args.get("model", ""),
         }
         result = await self.history_cache.get_history_for_page(
-            page=self._page_query_int("page", 1),
+            page=self._page_query_int("page", 1, maximum=None),
             page_size=self._page_query_int("page_size", 20),
             filters=filters,
         )
@@ -673,7 +674,7 @@ class ImageGenerationPlugin(Star):
 
     async def page_get_cache(self):
         cache = await self.history_cache.get_cache_for_page(
-            page=self._page_query_int("page", 1),
+            page=self._page_query_int("page", 1, maximum=None),
             page_size=self._page_query_int("page_size", 24),
         )
         return jsonify({"success": True, **cache})
@@ -991,6 +992,26 @@ class ImageGenerationPlugin(Star):
                 event, self._fallback_selfie_failure_message(failure_msg), with_reply=False
             )
 
+    def _build_generation_start_message(
+        self, generation_mode: str, prompt: str, *, default_message: str
+    ) -> str:
+        """只替换两个白名单占位符；不解析表达式，也不递归替换用户描述。"""
+        template = self.conf.get("general", {}).get("generation_start_message", "")
+        if not isinstance(template, str) or not template.strip():
+            return default_message
+        type_name = {
+            "text2image": "文生图",
+            "image2image": "图生图",
+            "selfie": "自拍",
+            "text2video": "文生视频",
+            "image2video": "图生视频",
+        }.get(generation_mode, "生图")
+        prompt_summary = prompt[:20] + "…" if len(prompt) > 20 else prompt
+        values = {"type": type_name, "prompt": prompt_summary}
+        rendered = re.sub(r"\{(type|prompt)\}", lambda match: values[match.group(1)], template)
+        # 防止仅含 {prompt} 的模板在空描述时发出空消息，中断后续生图。
+        return rendered if rendered.strip() else default_message
+
     async def handle_image_gen_logic(
         self,
         event: AstrMessageEvent,
@@ -1037,13 +1058,17 @@ class ImageGenerationPlugin(Star):
 
         # --- 提示语显示 ---
         if not display_name:
-            display_name = prompt[:20] + "..." if len(prompt) > 20 else prompt
+            display_name = prompt[:20] + "…" if len(prompt) > 20 else prompt
 
         general_conf = self.conf.get("general", {})
         quota_conf = self.conf.get("quota", {})
         concise_mode = general_conf.get("concise_mode", False) and bool(group_id)
-        start_msg = f"🎨 收到{'图生图' if is_i2i else '文生图'}请求，正在生成 [{display_name}]..."
         generation_mode = generation_mode or ("image2image" if is_i2i else "text2image")
+        start_msg = self._build_generation_start_message(
+            generation_mode,
+            display_name,
+            default_message=f"🎨 收到{'图生图' if is_i2i else '文生图'}请求，正在生成 [{display_name}]…",
+        )
 
         if concise_mode:
             logger.info(start_msg)
@@ -1460,7 +1485,13 @@ class ImageGenerationPlugin(Star):
         logger.info(f"[Selfie] 人设={persona_name}, 风格={style_name}, 参考图={len(images_to_send)}张（人设{len(persona_images)}张，额外{len(extra_images)}张）")
 
         if not is_llm_tool and not concise:
-            await self._send_plain_direct(event, f"📸 正在生成自拍 [{persona_name}]…")
+            await self._send_plain_direct(
+                event,
+                self._build_generation_start_message(
+                    "selfie", action.strip() or persona_name,
+                    default_message=f"📸 正在生成自拍 [{persona_name}]…",
+                ),
+            )
 
         # clamp count
         try:

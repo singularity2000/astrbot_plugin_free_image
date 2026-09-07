@@ -177,11 +177,21 @@
               <tbody id="history-body"></tbody>
             </table>
           </div>
-          <div class="pager history-pager">
-            <button class="btn" id="history-prev" type="button">上一页</button>
-            <span id="history-page-label">1 / 1</span>
-            <button class="btn" id="history-next" type="button">下一页</button>
-          </div>
+          <nav class="pager history-pager" id="history-pager" aria-label="生图统计分页">
+            <div class="pager-controls">
+              <button class="btn" id="history-first" type="button">首页</button>
+              <button class="btn" id="history-prev" type="button">上一页</button>
+              <span id="history-page-label" aria-live="polite">1 / 1</span>
+              <button class="btn" id="history-next" type="button">下一页</button>
+              <button class="btn" id="history-last" type="button">末页</button>
+            </div>
+            <div class="pager-jump">
+              <label for="history-page-input">转到</label>
+              <input id="history-page-input" type="text" inputmode="numeric" value="1" autocomplete="off" aria-label="生图统计跳转页码" title="输入整数页码，按回车或点击跳转" />
+              <span>页</span>
+              <button class="btn" id="history-jump" type="button">跳转</button>
+            </div>
+          </nav>
 
           <div class="section-head">
             <div>
@@ -215,11 +225,21 @@
             </label>
           </div>
           <div id="cache-grid" class="image-grid"></div>
-          <div class="pager">
-            <button class="btn" id="cache-prev" type="button">上一页</button>
-            <span id="cache-page-label">1 / 1</span>
-            <button class="btn" id="cache-next" type="button">下一页</button>
-          </div>
+          <nav class="pager" id="cache-pager" aria-label="缓存图库分页">
+            <div class="pager-controls">
+              <button class="btn" id="cache-first" type="button">首页</button>
+              <button class="btn" id="cache-prev" type="button">上一页</button>
+              <span id="cache-page-label" aria-live="polite">1 / 1</span>
+              <button class="btn" id="cache-next" type="button">下一页</button>
+              <button class="btn" id="cache-last" type="button">末页</button>
+            </div>
+            <div class="pager-jump">
+              <label for="cache-page-input">转到</label>
+              <input id="cache-page-input" type="text" inputmode="numeric" value="1" autocomplete="off" aria-label="缓存图库跳转页码" title="输入整数页码，按回车或点击跳转" />
+              <span>页</span>
+              <button class="btn" id="cache-jump" type="button">跳转</button>
+            </div>
+          </nav>
         </section>
         <section class="tab-panel" data-panel="settings">
           <div class="page-head">

@@ -18,6 +18,12 @@ CACHE_VERSION = 1
 PAGE_TABS = {"pipeline", "templates", "selfie", "history", "settings"}
 
 
+def normalize_history_mode(value: Any) -> str:
+    """兼容旧版统计名称；只规范读取副本/新记录，不迁移原有历史文件。"""
+    mode = str(value or "").strip()
+    return {"text2img": "text2image", "image2img": "image2image"}.get(mode, mode)
+
+
 def format_size(num_bytes: Any) -> str:
     """把字节数格式化为可读体积，规则与 Pages 前端的 formatBytes 保持一致。"""
     try:
@@ -87,6 +93,7 @@ class ImageHistoryCache:
         async with self._lock:
             self.data_dir.mkdir(parents=True, exist_ok=True)
 
+            mode = normalize_history_mode(mode)
             record_id = uuid.uuid4().hex
             created_at = datetime.now().isoformat(timespec="seconds")
             image_payloads = list(images or [])
@@ -199,7 +206,10 @@ class ImageHistoryCache:
         async with self._lock:
             self._sync_cache_existence()
             cache_by_id = {item.get("id"): item for item in self.cache_images}
-            all_records = [dict(record) for record in reversed(self.records)]
+            all_records = [
+                {**record, "mode": normalize_history_mode(record.get("mode"))}
+                for record in reversed(self.records)
+            ]
             filtered_records = self._filter_history_records(all_records, filters or {})
             total_count = len(filtered_records)
             page, page_size, total_pages, start, end = self._page_window(
@@ -290,7 +300,7 @@ class ImageHistoryCache:
         start = str(filters.get("start") or "").strip()
         end = str(filters.get("end") or "").strip()
         user = str(filters.get("user") or "").strip()
-        mode = str(filters.get("mode") or "").strip()
+        mode = normalize_history_mode(filters.get("mode"))
         model = str(filters.get("model") or "").strip()
 
         result: list[dict[str, Any]] = []
@@ -302,7 +312,7 @@ class ImageHistoryCache:
                 continue
             if user and str(record.get("user_id") or "") != user:
                 continue
-            if mode and str(record.get("mode") or "") != mode:
+            if mode and normalize_history_mode(record.get("mode")) != mode:
                 continue
             if model and str(record.get("model") or "") != model:
                 continue
@@ -313,7 +323,10 @@ class ImageHistoryCache:
     def _top_counts(records: list[dict[str, Any]], key: str, limit: int = 8) -> list[list[Any]]:
         counts: dict[str, int] = {}
         for record in records:
-            value = str(record.get(key) or "")
+            value = (
+                normalize_history_mode(record.get(key))
+                if key == "mode" else str(record.get(key) or "")
+            )
             if not value:
                 continue
             counts[value] = counts.get(value, 0) + 1
@@ -347,7 +360,7 @@ class ImageHistoryCache:
 
     @staticmethod
     def _history_facets(records: list[dict[str, Any]]) -> dict[str, Any]:
-        modes = sorted({str(item.get("mode") or "") for item in records if item.get("mode")})
+        modes = sorted({normalize_history_mode(item.get("mode")) for item in records if item.get("mode")})
         models = sorted({str(item.get("model") or "") for item in records if item.get("model")})
         user_names: dict[str, str] = {}
         for item in records:
@@ -574,6 +587,7 @@ class ImageHistoryCache:
         if not path or not path.is_file():
             return None
         result = dict(item)
+        result["mode"] = normalize_history_mode(item.get("mode"))
         result["url"] = f"/api/plug/astrbot_plugin_free_image/get_image?cache_id={item.get('id')}"
         return result
 

@@ -73,6 +73,7 @@ const state = {
   historyPageSize: DEFAULT_HISTORY_PAGE_SIZE,
   historyTotal: 0,
   historyTotalPages: 1,
+  historyLoading: false,
   historyStats: null,
   historyFacets: {
     modes: [],
@@ -91,6 +92,7 @@ const state = {
   cachePage: 1,
   cachePageSize: DEFAULT_CACHE_PAGE_SIZE,
   cacheTotalPages: 1,
+  cacheLoading: false,
   pagePrefs: {
     theme: DEFAULT_THEME,
     cache_page_size: DEFAULT_CACHE_PAGE_SIZE,
@@ -299,6 +301,10 @@ function modeLabel(mode) {
   return ({
     text2image: "文生图",
     image2image: "图生图",
+    text2img: "文生图",
+    image2img: "图生图",
+    text2video: "文生视频",
+    image2video: "图生视频",
     template: "模板",
     selfie: "自拍",
     video: "视频",
@@ -1139,8 +1145,7 @@ function updateHistoryFilters(records) {
 }
 
 function applyHistoryFilters() {
-  state.historyPage = 1;
-  void loadHistory();
+  void loadHistory(1);
 }
 
 function scheduleHistoryFilter() {
@@ -1235,6 +1240,67 @@ function renderMetrics(records) {
   if (byId("metric-users")) byId("metric-users").textContent = users;
 }
 
+// 历史与图库共用页码校验/按钮状态；只在请求成功后提交当前页。
+function pageJumpTarget(raw, totalPages) {
+  const text = String(raw ?? "").trim();
+  if (!/^-?\d+$/.test(text)) return null;
+  return Math.min(Math.max(1, Number(text)), Math.max(1, totalPages));
+}
+
+function renderPager(kind) {
+  const page = state[`${kind}Page`];
+  const total = Math.max(1, state[`${kind}TotalPages`] || 1);
+  const busy = state[`${kind}Loading`];
+  byId(`${kind}-pager`)?.setAttribute("aria-busy", String(busy));
+  byId(`${kind}-page-label`).textContent = `${page} / ${total}`;
+  for (const action of ["first", "prev", "next", "last"]) {
+    const atBoundary = ["first", "prev"].includes(action) ? page <= 1 : page >= total;
+    byId(`${kind}-${action}`).disabled = busy || atBoundary;
+  }
+  const input = byId(`${kind}-page-input`);
+  input.value = String(page);
+  input.disabled = busy || total <= 1;
+  byId(`${kind}-jump`).disabled = busy || total <= 1;
+  const sizeSelect = byId(`${kind}-page-size`);
+  sizeSelect.disabled = busy;
+  if (!busy) sizeSelect.value = String(state[`${kind}PageSize`]);
+}
+
+function bindPager(kind, loadPage) {
+  const input = byId(`${kind}-page-input`);
+  const normalizeInput = () => {
+    const target = pageJumpTarget(input.value, state[`${kind}TotalPages`]);
+    if (target === null) {
+      if (input.value.trim()) showToast("请输入整数页码。", "error");
+      input.value = String(state[`${kind}Page`]);
+      return null;
+    }
+    input.value = String(target);
+    return target;
+  };
+  const navigate = (target) => {
+    if (state[`${kind}Loading`] || target === null) return;
+    const page = pageJumpTarget(target, state[`${kind}TotalPages`]);
+    if (page === null || page === state[`${kind}Page`]) {
+      renderPager(kind);
+      return;
+    }
+    void loadPage(page);
+  };
+  byId(`${kind}-first`)?.addEventListener("click", () => navigate(1));
+  byId(`${kind}-prev`)?.addEventListener("click", () => navigate(state[`${kind}Page`] - 1));
+  byId(`${kind}-next`)?.addEventListener("click", () => navigate(state[`${kind}Page`] + 1));
+  byId(`${kind}-last`)?.addEventListener("click", () => navigate(state[`${kind}TotalPages`]));
+  byId(`${kind}-jump`)?.addEventListener("click", () => navigate(normalizeInput()));
+  input?.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.isComposing) return;
+    event.preventDefault();
+    navigate(normalizeInput());
+  });
+  // 失焦只整理输入，避免点击“跳转”时因 blur/click 连续发出两次请求。
+  input?.addEventListener("blur", normalizeInput);
+}
+
 function renderHistory() {
   const records = state.filteredHistory;
   renderMetrics(records);
@@ -1249,9 +1315,7 @@ function renderHistory() {
   const totalPages = Math.max(1, Number(state.historyTotalPages || 1));
   state.historyPage = Math.min(Math.max(1, state.historyPage), totalPages);
   const pageRecords = records;
-  byId("history-page-label").textContent = `${state.historyPage} / ${totalPages}`;
-  byId("history-prev").disabled = state.historyPage <= 1;
-  byId("history-next").disabled = state.historyPage >= totalPages;
+  renderPager("history");
   if (!records.length) {
     tbody.innerHTML = `<tr><td colspan="7" class="empty">暂无生图记录。</td></tr>`;
     return;
@@ -1282,10 +1346,10 @@ function renderHistory() {
   }).join("");
 }
 
-function historyQueryParams() {
+function historyQueryParams(page = state.historyPage, pageSize = state.historyPageSize) {
   return {
-    page: state.historyPage,
-    page_size: state.historyPageSize,
+    page,
+    page_size: pageSize,
     start: byId("filter-start")?.value || "",
     end: byId("filter-end")?.value || "",
     user: (byId("filter-user")?.value || "").trim(),
@@ -1294,27 +1358,39 @@ function historyQueryParams() {
   };
 }
 
-async function loadHistory() {
-  setPageStatus("正在加载生图统计...");
+async function loadHistory(page = state.historyPage, pageSize = state.historyPageSize) {
+  setPageStatus("正在加载生图统计…");
   const requestId = ++historyRequestSerial;
-  const result = await callApi("加载生图统计", () => bridge.apiGet("get_history", historyQueryParams()));
-  if (requestId !== historyRequestSerial) return;
-  if (result?.success === false) return;
-  state.history = Array.isArray(result.records) ? result.records : [];
-  state.filteredHistory = state.history;
-  state.historyPage = Number(result.page || state.historyPage || 1);
-  state.historyPageSize = normalizeHistoryPageSize(result.page_size || state.historyPageSize);
-  state.historyTotal = Number(result.total_count || state.history.length || 0);
-  state.historyTotalPages = Number(result.total_pages || 1);
-  state.historyStats = result.stats || null;
-  state.historyFacets = {
-    modes: Array.isArray(result.facets?.modes) ? result.facets.modes : [],
-    models: Array.isArray(result.facets?.models) ? result.facets.models : [],
-    users: Array.isArray(result.facets?.users) ? result.facets.users : [],
-  };
-  updateHistoryFilters(state.history);
-  renderHistory();
-  setPageStatus();
+  state.historyLoading = true;
+  renderPager("history");
+  try {
+    const result = await callApi("加载生图统计", () => bridge.apiGet("get_history", historyQueryParams(page, pageSize)));
+    if (requestId !== historyRequestSerial) return;
+    if (result?.success === false) {
+      setPageStatus("生图统计加载失败，请重试；仍保留上次已加载的数据。", "error");
+      return;
+    }
+    state.history = Array.isArray(result.records) ? result.records : [];
+    state.filteredHistory = state.history;
+    state.historyPage = Number(result.page || state.historyPage || 1);
+    state.historyPageSize = normalizeHistoryPageSize(result.page_size || state.historyPageSize);
+    state.historyTotal = Number(result.total_count || state.history.length || 0);
+    state.historyTotalPages = Number(result.total_pages || 1);
+    state.historyStats = result.stats || null;
+    state.historyFacets = {
+      modes: Array.isArray(result.facets?.modes) ? result.facets.modes : [],
+      models: Array.isArray(result.facets?.models) ? result.facets.models : [],
+      users: Array.isArray(result.facets?.users) ? result.facets.users : [],
+    };
+    updateHistoryFilters(state.history);
+    renderHistory();
+    setPageStatus();
+  } finally {
+    if (requestId === historyRequestSerial) {
+      state.historyLoading = false;
+      renderPager("history");
+    }
+  }
 }
 
 function renderCacheSettings() {
@@ -1336,9 +1412,7 @@ function renderCacheGrid() {
   const totalPages = Math.max(1, Number(state.cacheTotalPages || 1));
   state.cachePage = Math.min(Math.max(1, state.cachePage), totalPages);
   const pageItems = images;
-  byId("cache-page-label").textContent = `${state.cachePage} / ${totalPages}`;
-  byId("cache-prev").disabled = state.cachePage <= 1;
-  byId("cache-next").disabled = state.cachePage >= totalPages;
+  renderPager("cache");
   if (!pageItems.length) {
     grid.innerHTML = `<div class="empty">当前没有已保存的缓存图片。</div>`;
     return;
@@ -1362,30 +1436,42 @@ function renderCacheGrid() {
   loadPreviewImages(grid);
 }
 
-async function loadCache() {
-  setPageStatus("正在加载缓存...");
+async function loadCache(page = state.cachePage, pageSize = state.cachePageSize) {
+  setPageStatus("正在加载缓存…");
   const requestId = ++cacheRequestSerial;
-  const result = await callApi("加载缓存", () => bridge.apiGet("get_cache", {
-    page: state.cachePage,
-    page_size: state.cachePageSize,
-  }));
-  if (requestId !== cacheRequestSerial) return;
-  if (result?.success === false) return;
-  state.cachePage = Number(result.page || state.cachePage || 1);
-  state.cachePageSize = normalizeCachePageSize(result.page_size || state.cachePageSize);
-  state.cacheTotalPages = Number(result.total_pages || 1);
-  state.cache = {
-    ...state.cache,
-    enabled: Boolean(result.enabled),
-    max_mb: result.max_mb || "",
-    max_hours: result.max_hours || "",
-    max_count: result.max_count || "",
-    total_count: Number(result.total_count || 0),
-    total_bytes: Number(result.total_bytes || 0),
-    images: Array.isArray(result.images) ? result.images : [],
-  };
-  renderCacheGrid();
-  setPageStatus();
+  state.cacheLoading = true;
+  renderPager("cache");
+  try {
+    const result = await callApi("加载缓存", () => bridge.apiGet("get_cache", {
+      page,
+      page_size: pageSize,
+    }));
+    if (requestId !== cacheRequestSerial) return;
+    if (result?.success === false) {
+      setPageStatus("缓存加载失败，请重试；仍保留上次已加载的数据。", "error");
+      return;
+    }
+    state.cachePage = Number(result.page || state.cachePage || 1);
+    state.cachePageSize = normalizeCachePageSize(result.page_size || state.cachePageSize);
+    state.cacheTotalPages = Number(result.total_pages || 1);
+    state.cache = {
+      ...state.cache,
+      enabled: Boolean(result.enabled),
+      max_mb: result.max_mb || "",
+      max_hours: result.max_hours || "",
+      max_count: result.max_count || "",
+      total_count: Number(result.total_count || 0),
+      total_bytes: Number(result.total_bytes || 0),
+      images: Array.isArray(result.images) ? result.images : [],
+    };
+    renderCacheGrid();
+    setPageStatus();
+  } finally {
+    if (requestId === cacheRequestSerial) {
+      state.cacheLoading = false;
+      renderPager("cache");
+    }
+  }
 }
 
 async function refreshStatisticsView(button) {
@@ -2015,37 +2101,21 @@ function bindEvents() {
     markDirty("cache");
   });
   byId("clear-cache")?.addEventListener("click", (event) => clearCache(event.currentTarget));
-  byId("cache-prev")?.addEventListener("click", () => {
-    state.cachePage = Math.max(1, state.cachePage - 1);
-    void loadCache();
-  });
-  byId("cache-next")?.addEventListener("click", () => {
-    state.cachePage += 1;
-    void loadCache();
-  });
+  bindPager("cache", loadCache);
   byId("cache-page-size")?.addEventListener("change", (event) => {
-    state.cachePageSize = normalizeCachePageSize(event.target.value);
-    state.pagePrefs.cache_page_size = state.cachePageSize;
-    safeStorageSet(CACHE_PAGE_SIZE_KEY, state.cachePageSize);
-    state.cachePage = 1;
-    void loadCache();
-    void persistPagePrefs({ cache_page_size: state.cachePageSize });
+    const pageSize = normalizeCachePageSize(event.target.value);
+    state.pagePrefs.cache_page_size = pageSize;
+    safeStorageSet(CACHE_PAGE_SIZE_KEY, pageSize);
+    void loadCache(1, pageSize);
+    void persistPagePrefs({ cache_page_size: pageSize });
   });
-  byId("history-prev")?.addEventListener("click", () => {
-    state.historyPage = Math.max(1, state.historyPage - 1);
-    void loadHistory();
-  });
-  byId("history-next")?.addEventListener("click", () => {
-    state.historyPage += 1;
-    void loadHistory();
-  });
+  bindPager("history", loadHistory);
   byId("history-page-size")?.addEventListener("change", (event) => {
-    state.historyPageSize = normalizeHistoryPageSize(event.target.value);
-    state.pagePrefs.history_page_size = state.historyPageSize;
-    safeStorageSet(HISTORY_PAGE_SIZE_KEY, state.historyPageSize);
-    state.historyPage = 1;
-    void loadHistory();
-    void persistPagePrefs({ history_page_size: state.historyPageSize });
+    const pageSize = normalizeHistoryPageSize(event.target.value);
+    state.pagePrefs.history_page_size = pageSize;
+    safeStorageSet(HISTORY_PAGE_SIZE_KEY, pageSize);
+    void loadHistory(1, pageSize);
+    void persistPagePrefs({ history_page_size: pageSize });
   });
   byId("add-persona")?.addEventListener("click", () => {
     const index = state.selfie.personas.length + 1;

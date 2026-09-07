@@ -1040,10 +1040,43 @@ label {
 
 .pager {
   display: flex;
+  flex-wrap: wrap;
   justify-content: center;
   align-items: center;
-  gap: 12px;
+  gap: 12px 20px;
   margin-top: 14px;
+}
+
+.pager-controls,
+.pager-jump {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.pager-controls {
+  flex-wrap: wrap;
+}
+
+.pager-controls > span {
+  min-width: 64px;
+  text-align: center;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.pager-jump {
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.pager-jump input {
+  width: 76px;
+  min-width: 0;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
 .selfie-layout,
@@ -1494,6 +1527,21 @@ label {
   .slideshow {
     grid-template-columns: 44px minmax(0, 1fr) 44px;
     padding: 12px;
+  }
+}
+
+@media (max-width: 380px) {
+  .pager-controls {
+    gap: 4px;
+  }
+
+  .pager-controls .btn {
+    padding: 8px 6px;
+  }
+
+  .pager-controls > span {
+    min-width: 54px;
+    font-size: 12px;
   }
 }
 
