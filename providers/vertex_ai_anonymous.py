@@ -11,7 +11,7 @@ from bs4 import BeautifulSoup
 
 from astrbot import logger
 
-from .base import BaseProvider
+from .base import BaseProvider, ReferenceLogContext
 
 QUERY_SIGNATURE = "2/l8eCsMMY49imcDQ/lwwXyL8cYtTjxZBF2dNqy69LodY="
 OPERATION_NAME = "StreamGenerateContentAnonymous"
@@ -151,8 +151,10 @@ class VertexAIAnonymousProvider(BaseProvider):
         await self._retire_active_session()
 
     async def generate(
-        self, image_bytes_list: List[bytes], prompt: str
+        self, image_bytes_list: List[bytes], prompt: str,
+        *, request_log: ReferenceLogContext | None = None,
     ) -> Union[bytes, list[bytes], str]:
+        request_log = request_log or ReferenceLogContext(original_count=len(image_bytes_list))
         if not CURL_CFFI_AVAILABLE:
             return "Vertex AI 生成失败: 环境缺失 curl_cffi，无法规避 Google 指纹风控。请安装 curl_cffi 后重试。"
 
@@ -189,6 +191,7 @@ class VertexAIAnonymousProvider(BaseProvider):
 
         # 当前 recaptcha token 的本地尝试次数：
         # 经验上在 Failed to verify action 场景下，第二次提交同 token 可能成功
+        request_attempt = 0
         captcha_try_count = 0
         attempt = 0
         error_status_code = None
@@ -238,6 +241,14 @@ class VertexAIAnonymousProvider(BaseProvider):
                             raise RuntimeError("无法创建 curl_cffi 会话")
 
                         try:
+                            request_attempt += 1
+                            self._log_image_request(
+                                request_log, received_count=len(image_bytes_list),
+                                sent_count=sum("inlineData" in part for part in body["variables"]["contents"][0]["parts"]),
+                                attempt_no=attempt,
+                                internal_attempt=fva_retry, internal_budget=5,
+                                first_request=request_attempt == 1,
+                            )
                             resp = await session.post(
                                 api_url, json=body, headers=headers, timeout=api_timeout
                             )

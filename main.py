@@ -23,6 +23,7 @@ from quart import jsonify, request, send_file
 from .commands import CommandHandlers
 from .history_cache import ImageHistoryCache
 from .pipeline import ImageGenPipeline
+from .providers.base import ReferenceLogContext
 from .quota import PersistenceManager, UsageGuard
 from .selfie import (
     build_selfie_prompt,
@@ -32,7 +33,7 @@ from .selfie import (
     resolve_style,
 )
 from .sender import ImageResultSender
-from .workflow import ImageWorkflow
+from .workflow import ImageInputError, ImageWorkflow
 
 
 PLUGIN_NAME = "astrbot_plugin_free_image"
@@ -45,7 +46,7 @@ SETTINGS_GROUPS = ("general", "access_control", "quota", "checkin", "llm_tools")
     PLUGIN_NAME,
     "Singularity2000",
     "文生图、图生图，可自定义模型能力与提示词模板，兼容多种端点",
-    "3.7.0",
+    "3.7.5",
     "https://github.com/singularity2000/astrbot_plugin_free_image",
 )
 class ImageGenerationPlugin(Star):
@@ -142,6 +143,8 @@ class ImageGenerationPlugin(Star):
             ("save_settings", self.page_save_settings, ["POST"], "保存 FreeImage 通用设置"),
             ("save_config_bundle", self.page_save_config_bundle, ["POST"], "统一保存 FreeImage Pages 配置"),
             ("set_cache_enabled", self.page_set_cache_enabled, ["POST"], "切换 FreeImage 缓存开关"),
+            ("delete_history_records", self.page_delete_history_records, ["POST"], "删除生图记录及图片"),
+            ("set_image_favorite", self.page_set_image_favorite, ["POST"], "设置图片收藏"),
             ("get_history", self.page_get_history, ["GET"], "获取 FreeImage 生图历史"),
             ("get_cache", self.page_get_cache, ["GET"], "获取 FreeImage 缓存列表"),
             ("clear_cache", self.page_clear_cache, ["POST"], "清理 FreeImage 缓存"),
@@ -664,6 +667,8 @@ class ImageGenerationPlugin(Star):
             "user": request.args.get("user", ""),
             "mode": request.args.get("mode", ""),
             "model": request.args.get("model", ""),
+            "keyword": request.args.get("keyword", ""),
+            "favorites_only": request.args.get("favorites_only", "").lower() == "true",
         }
         result = await self.history_cache.get_history_for_page(
             page=self._page_query_int("page", 1, maximum=None),
@@ -676,8 +681,28 @@ class ImageGenerationPlugin(Star):
         cache = await self.history_cache.get_cache_for_page(
             page=self._page_query_int("page", 1, maximum=None),
             page_size=self._page_query_int("page_size", 24),
+            favorites_only=request.args.get("favorites_only", "").lower() == "true",
         )
         return jsonify({"success": True, **cache})
+
+    async def page_set_image_favorite(self):
+        payload = await request.get_json(silent=True)
+        if (not isinstance(payload, dict) or not isinstance(payload.get("favorite"), bool)
+                or not isinstance(payload.get("cache_id"), str) or not payload["cache_id"].strip()):
+            return jsonify({"success": False, "message": "需要图片 ID 和布尔收藏状态。"}), 400
+        found = await self.history_cache.set_favorite(payload["cache_id"], payload["favorite"])
+        if not found:
+            return jsonify({"success": False, "message": "图片不存在或已被清理，无法收藏。"}), 404
+        return jsonify({"success": True, "cache_id": payload["cache_id"], "favorite": payload["favorite"]})
+
+    async def page_delete_history_records(self):
+        payload = await request.get_json(silent=True)
+        ids = payload.get("record_ids") if isinstance(payload, dict) else None
+        if (not isinstance(ids, list) or not 1 <= len(ids) <= 100
+                or any(not isinstance(item, str) or not item.strip() for item in ids)):
+            return jsonify({"success": False, "message": "请选择 1 至 100 条有效记录。"}), 400
+        result = await self.history_cache.delete_history_records(ids)
+        return jsonify({"success": True, "cleanup": result})
 
     async def page_clear_cache(self):
         result = await self.history_cache.clear_cache(reason="webui")
@@ -693,6 +718,8 @@ class ImageGenerationPlugin(Star):
             return jsonify({"success": False, "message": "缺少缓存图片 ID。"}), 400
         result = await self.history_cache.delete_cache_image(cache_id, reason="webui")
         cache = await self.history_cache.get_cache_for_page()
+        if result.get("failed_count"):
+            return jsonify({"success": False, "message": "本地图片删除失败，已保留图片和索引，请检查文件权限或占用。", "cleanup": result}), 500
         return jsonify({"success": True, "cleanup": result, **cache})
 
     async def page_save_personas(self):
@@ -832,6 +859,27 @@ class ImageGenerationPlugin(Star):
             return text.removeprefix(command).strip()
         return text
 
+    async def _prepare_tool_images(
+        self, event: AstrMessageEvent, *, is_i2i: bool = True, selfie: bool = False
+    ) -> tuple[list[bytes], str | None]:
+        """工具返回前固定参考图字节；权限/冷却只检查一次，后台不再依赖临时文件。"""
+        if not self.pipeline or not self.sender or not self.usage_guard:
+            return [], "插件尚未完成初始化。"
+        error = await self.usage_guard.check_can_use(event, self.is_global_admin(event))
+        if error is not None:
+            return [], error
+        if not is_i2i or not self.iwf:
+            return [], None
+        try:
+            images = (await self.iwf.get_selfie_extra_images(event) if selfie
+                      else await self.iwf.get_images(event))
+            return images, None
+        except ImageInputError as exc:
+            return [], str(exc)
+        except Exception as exc:
+            logger.warning(f"工具参考图读取失败（{type(exc).__name__}）")
+            return [], "参考图片读取失败，请重新发送图片后重试。"
+
     @filter.llm_tool(name="image_generation")
     async def image_generation(self, event: AstrMessageEvent, prompt: str, count: int = 1):
         """专业的文生图、图生图工具。理解用户语义，仅当用户需要你生图，或修改图片内容时才调用此工具。
@@ -850,6 +898,13 @@ class ImageGenerationPlugin(Star):
         except (TypeError, ValueError):
             count = 1
 
+        prepared_images, prepare_error = await self._prepare_tool_images(event, is_i2i=is_i2i)
+        if prepare_error is not None:
+            if prepare_error:
+                await self._send_with_auto_quote(event, self._quoted_plain_result(event, prepare_error))
+            event.stop_event()
+            return
+
         # 异步启动后台任务，避免阻塞 LLM 导致超时
         async def _run_background_gen():
             try:
@@ -860,6 +915,8 @@ class ImageGenerationPlugin(Star):
                     request_source="llm_tool",
                     count=count,
                     generation_mode="image2image" if is_i2i else "text2image",
+                    prepared_images=prepared_images,
+                    usage_checked=True,
                 ):
                     await self._send_with_auto_quote(event, result, request_source="llm_tool")
             except Exception as e:
@@ -1022,6 +1079,8 @@ class ImageGenerationPlugin(Star):
         count: int = 1,
         model_index: Optional[int] = None,
         generation_mode: str | None = None,
+        prepared_images: list[bytes] | None = None,
+        usage_checked: bool = False,
     ):
         if not self.pipeline or not self.sender or not self.usage_guard:
             yield self._quoted_plain_result(event, "❌ 插件尚未完成初始化，请稍后再试。")
@@ -1032,17 +1091,25 @@ class ImageGenerationPlugin(Star):
         is_master = self.is_global_admin(event)
 
         # --- 权限和次数检查 ---
-        if quota_error := await self.usage_guard.check_can_use(event, is_master):
-            yield self._quoted_plain_result(event, quota_error)
-            return
-        if quota_error == "":
-            return
+        if not usage_checked:
+            quota_error = await self.usage_guard.check_can_use(event, is_master)
+            if quota_error is not None:
+                if quota_error:
+                    yield self._quoted_plain_result(event, quota_error)
+                return
 
         # --- 图片获取 (仅图生图) ---
 
         images_to_process = []
         if is_i2i:
-            if not self.iwf or not (img_bytes_list := await self.iwf.get_images(event)):
+            try:
+                img_bytes_list = prepared_images
+                if img_bytes_list is None:
+                    img_bytes_list = await self.iwf.get_images(event) if self.iwf else []
+            except ImageInputError as exc:
+                yield self._quoted_plain_result(event, str(exc))
+                return
+            if not img_bytes_list:
                 yield self._quoted_plain_result(event, "请发送或引用一张图片。")
                 return
 
@@ -1106,6 +1173,11 @@ class ImageGenerationPlugin(Star):
             if total_remain < count:
                 available = max(1, total_remain) if total_remain > 0 else 1
 
+        request_log = ReferenceLogContext(
+            original_count=len(img_bytes_list) if is_i2i else 0,
+            mode=generation_mode, count=count,
+        )
+
         # --- API 调用（支持多张） ---
         # 管理员：并发请求（彼此间隔2秒防抖启动），不扣费无竞态
         # 非管理员：串行请求，无间隔（Provider 内部已有重试退避）
@@ -1113,14 +1185,14 @@ class ImageGenerationPlugin(Star):
             async for res in self._batch_generate_concurrent(
                 event, prompt, images_to_process, count, available,
                 is_i2i, display_name, concise_mode, request_source, model_index,
-                generation_mode,
+                generation_mode, request_log,
             ):
                 yield res
         else:
             async for res in self._batch_generate_sequential(
                 event, prompt, images_to_process, count, available,
                 is_master, is_i2i, display_name, concise_mode,
-                request_source, sender_id, group_id, model_index, generation_mode,
+                request_source, sender_id, group_id, model_index, generation_mode, request_log,
             ):
                 yield res
 
@@ -1140,8 +1212,12 @@ class ImageGenerationPlugin(Star):
         group_id: str,
         model_index: Optional[int],
         generation_mode: str,
+        request_log: ReferenceLogContext | None = None,
     ):
         """非管理员串行生图，无间隔。管理员单张也走这里。"""
+        request_log = request_log or ReferenceLogContext(
+            original_count=len(images_to_process), mode=generation_mode, count=count
+        )
         for i in range(count):
             suffix = f" ({i+1}/{count})" if count > 1 else ""
             if i >= available:
@@ -1151,7 +1227,8 @@ class ImageGenerationPlugin(Star):
 
             start_time = datetime.now()
             res, model_name = await self.pipeline.execute(
-                images_to_process, prompt, model_index=model_index, generation_mode=generation_mode
+                images_to_process, prompt, model_index=model_index, generation_mode=generation_mode,
+                request_log=request_log.for_task(i + 1),
             )
             elapsed = (datetime.now() - start_time).total_seconds()
 
@@ -1175,8 +1252,12 @@ class ImageGenerationPlugin(Star):
         request_source: Literal["command", "llm_tool"],
         model_index: Optional[int],
         generation_mode: str,
+        request_log: ReferenceLogContext | None = None,
     ):
         """管理员并发生图，彼此间隔2秒防抖启动。不扣费，无竞态。"""
+        request_log = request_log or ReferenceLogContext(
+            original_count=len(images_to_process), mode=generation_mode, count=count
+        )
         sender_id = event.get_sender_id()
         group_id = event.get_group_id()
 
@@ -1188,7 +1269,8 @@ class ImageGenerationPlugin(Star):
 
             start_time = datetime.now()
             res, model_name = await self.pipeline.execute(
-                images_to_process, prompt, model_index=model_index, generation_mode=generation_mode
+                images_to_process, prompt, model_index=model_index, generation_mode=generation_mode,
+                request_log=request_log.for_task(i + 1),
             )
             elapsed = (datetime.now() - start_time).total_seconds()
             return ("result", i, suffix, (res, model_name, elapsed))
@@ -1437,6 +1519,8 @@ class ImageGenerationPlugin(Star):
         is_llm_tool: bool = False,
         count: int = 1,
         model_index: Optional[int] = None,
+        prepared_images: list[bytes] | None = None,
+        usage_checked: bool = False,
     ) -> str:
         """执行自拍生图，返回状态字符串。图片通过 event.send 直接发送。"""
         group_id = event.get_group_id()
@@ -1451,7 +1535,7 @@ class ImageGenerationPlugin(Star):
             return "自拍失败，原因：插件尚未完成初始化。"
 
         is_master = self.is_global_admin(event)
-        quota_err = await self.usage_guard.check_can_use(event, is_master)
+        quota_err = None if usage_checked else await self.usage_guard.check_can_use(event, is_master)
         if quota_err is not None:
             if quota_err and not is_llm_tool:
                 await self._send_plain_direct(event, quota_err)
@@ -1466,12 +1550,15 @@ class ImageGenerationPlugin(Star):
         if not persona_images:
             return f"自拍失败，原因：人设「{persona.get('name', persona.get('id'))}」没有可用的参考图，请检查路径是否正确。"
 
-        extra_images: list[bytes] = []
-        if self.iwf:
+        extra_images = prepared_images if prepared_images is not None else []
+        if prepared_images is None and self.iwf:
             try:
                 extra_images = await self.iwf.get_selfie_extra_images(event)
-            except Exception:
-                extra_images = []
+            except Exception as exc:
+                detail = str(exc) if isinstance(exc, ImageInputError) else "参考图片读取失败，请重新发送后重试。"
+                if not is_llm_tool:
+                    await self._send_plain_direct(event, detail)
+                return f"自拍失败，原因：{detail}"
 
         images_to_send = combine_images(persona_images, extra_images)
 
@@ -1482,7 +1569,7 @@ class ImageGenerationPlugin(Star):
         prompt = build_selfie_prompt(persona, action, style)
         persona_name = persona.get("name", persona.get("id", ""))
         style_name = style.get("name", "") if style else "无风格"
-        logger.info(f"[Selfie] 人设={persona_name}, 风格={style_name}, 参考图={len(images_to_send)}张（人设{len(persona_images)}张，额外{len(extra_images)}张）")
+        logger.info(f"[Selfie] 人设={persona_name}, 风格={style_name}")
 
         if not is_llm_tool and not concise:
             await self._send_plain_direct(
@@ -1511,6 +1598,11 @@ class ImageGenerationPlugin(Star):
             if total_remain < count:
                 available = max(1, total_remain) if total_remain > 0 else 1
 
+        request_log = ReferenceLogContext(
+            original_count=len(persona_images) + len(extra_images), mode="selfie",
+            persona_count=len(persona_images), count=count,
+        )
+
         request_source: Literal["command", "llm_tool"] = "llm_tool" if is_llm_tool else "command"
         last_result = ""
         had_success = False
@@ -1521,7 +1613,7 @@ class ImageGenerationPlugin(Star):
             # 并发启动，彼此间隔2秒防抖
             tasks: list[asyncio.Task] = []
             for i in range(count):
-                tasks.append(asyncio.create_task(self._selfie_single(i, count, available, event, images_to_send, prompt, model_index)))
+                tasks.append(asyncio.create_task(self._selfie_single(i, count, available, event, images_to_send, prompt, model_index, request_log)))
                 if i < count - 1:
                     await asyncio.sleep(2)
 
@@ -1591,7 +1683,8 @@ class ImageGenerationPlugin(Star):
 
                 start_time = datetime.now()
                 res, model_name = await self.pipeline.execute(
-                    images_to_send, prompt, model_index=model_index, generation_mode="image2image"
+                    images_to_send, prompt, model_index=model_index, generation_mode="image2image",
+                    request_log=request_log.for_task(i + 1),
                 )
                 elapsed = (datetime.now() - start_time).total_seconds()
 
@@ -1664,6 +1757,7 @@ class ImageGenerationPlugin(Star):
         images_to_send: list,
         prompt: str,
         model_index: Optional[int],
+        request_log: ReferenceLogContext | None = None,
     ):
         """单次自拍生图任务，供并发使用。返回 (kind, suffix, payload)。"""
         suffix = f" ({i+1}/{count})" if count > 1 else ""
@@ -1671,9 +1765,13 @@ class ImageGenerationPlugin(Star):
             group_id = event.get_group_id()
             return ("quota", suffix, self._build_quota_msg(group_id))
 
+        request_log = request_log or ReferenceLogContext(
+            original_count=len(images_to_send), mode="selfie", count=count
+        )
         start_time = datetime.now()
         res, model_name = await self.pipeline.execute(
-            images_to_send, prompt, model_index=model_index, generation_mode="image2image"
+            images_to_send, prompt, model_index=model_index, generation_mode="image2image",
+            request_log=request_log.for_task(i + 1),
         )
         elapsed = (datetime.now() - start_time).total_seconds()
         return ("result", suffix, (res, model_name, elapsed))
@@ -1745,6 +1843,13 @@ class ImageGenerationPlugin(Star):
             except Exception as e:
                 logger.debug(f"[send_selfie] 贴表情失败: {e}")
 
+        prepared_images, prepare_error = await self._prepare_tool_images(event, selfie=True)
+        if prepare_error is not None:
+            if prepare_error:
+                await self._explain_selfie_failure_with_llm(event, f"自拍失败，原因：{prepare_error}")
+            event.stop_event()
+            return
+
         async def _bg():
             try:
                 result_msg = await self._exec_selfie(
@@ -1753,6 +1858,8 @@ class ImageGenerationPlugin(Star):
                     style_id_override=style_id,
                     is_llm_tool=True,
                     count=count,
+                    prepared_images=prepared_images,
+                    usage_checked=True,
                 )
                 if result_msg.startswith("自拍失败"):
                     await self._explain_selfie_failure_with_llm(event, result_msg)

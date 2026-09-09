@@ -358,10 +358,10 @@ class CommandHandlers:
     def image_cache_help(self) -> str:
         return (
             "画图缓存命令：\n"
-            "#画图缓存 状态\n"
-            "#画图缓存 开启\n"
-            "#画图缓存 关闭\n"
-            "#画图缓存 清理"
+            "画图缓存 状态\n"
+            "画图缓存 开启\n"
+            "画图缓存 关闭\n"
+            "画图缓存 清理（保留收藏和历史）"
         )
 
     async def on_image_cache_command(self, event: AstrMessageEvent):
@@ -397,7 +397,8 @@ class CommandHandlers:
         if raw == "清理":
             result = await p.history_cache.clear_cache(reason="command")
             yield event.plain_result(
-                f"✅ 已清理画图缓存：删除 {result['deleted_count']} 张，释放 {format_size(result['deleted_bytes'])}。"
+                f"已清理普通缓存（收藏和历史保留）：删除 {result['deleted_count']} 张，释放 {format_size(result['deleted_bytes'])}。"
+                f"删除失败 {result.get('failed_count', 0)} 张（失败图片保留，请检查文件占用或权限）。"
             )
             event.stop_event()
             return
@@ -413,6 +414,7 @@ class CommandHandlers:
                 "画图缓存状态：\n"
                 f"状态: {enabled_text}\n"
                 f"当前缓存: {stats.get('total_count', 0)} 张，{format_size(stats.get('total_bytes', 0))}\n"
+                + f"收藏: {stats.get('favorite_count', 0)} 张，{format_size(stats.get('favorite_bytes', 0))}（不计入限额）\n"
                 + "\n".join(limit_parts)
             )
             event.stop_event()
@@ -485,27 +487,45 @@ class CommandHandlers:
             f"🎉 签到成功！获得 {reward} 次（永久），当前总剩余: {new_total_count} 次。"
         )
 
+    def _parse_count_target(self, event: AstrMessageEvent, command: str, *, adding: bool = False):
+        """只解析命令参数；唤醒机器人的 @ 不属于目标用户。"""
+        text = self.plugin._get_plain_message_text(event, strip_wake_prefix=True)
+        args = self.plugin._strip_command_prefix(text, command).split()
+        targets = {
+            str(seg.qq).strip() for seg in event.message_obj.message
+            if isinstance(seg, At) and str(seg.qq).strip() != str(event.get_self_id()).strip()
+        }
+        if len(targets) > 1:
+            raise ValueError("请只指定一位目标用户。")
+        target = next(iter(targets), None)
+        count = None
+        if adding:
+            if not args or not args[-1].isdigit() or int(args[-1]) <= 0:
+                raise ValueError("请填写正整数次数。")
+            count = int(args.pop())
+        if args:
+            if len(args) != 1 or not args[0].isdigit():
+                raise ValueError("请使用 @用户 或 QQ号 指定目标。")
+            if target is not None and target != args[0]:
+                raise ValueError("@用户与填写的 QQ号不一致，请只指定一位目标用户。")
+            target = args[0]
+        if target is not None and (not target or target == "all"):
+            raise ValueError("请指定一位有效的目标用户。")
+        if adding and target is None:
+            raise ValueError("请指定需要增加次数的用户。")
+        return target or event.get_sender_id(), count
+
     async def on_add_user_counts(self, event: AstrMessageEvent):
         p = self.plugin
         if not p.is_global_admin(event):
             yield event.plain_result(self.admin_denied_message())
             event.stop_event()
             return
-        cmd_text = event.message_str.strip()
-        at_seg = next((s for s in event.message_obj.message if isinstance(s, At)), None)
-        target_qq, count = None, 0
-        if at_seg:
-            target_qq = str(at_seg.qq)
-            match = re.search(r"(\d+)\s*$", cmd_text)
-            if match:
-                count = int(match.group(1))
-        else:
-            match = re.search(r"(\d+)\s+(\d+)", cmd_text)
-            if match:
-                target_qq, count = match.group(1), int(match.group(2))
-        if not target_qq or count <= 0:
+        try:
+            target_qq, count = self._parse_count_target(event, "画图增加用户次数", adding=True)
+        except ValueError as exc:
             yield event.plain_result(
-                "格式错误:\n#画图增加用户次数 @用户 <次数>\n或 #画图增加用户次数 <QQ号> <次数>"
+                f"{exc}\n格式：画图增加用户次数 @用户 <次数>\n或 画图增加用户次数 <QQ号> <次数>"
             )
             event.stop_event()
             return
@@ -539,13 +559,12 @@ class CommandHandlers:
         p = self.plugin
         user_id_to_query = event.get_sender_id()
         if p.is_global_admin(event):
-            at_seg = next((s for s in event.message_obj.message if isinstance(s, At)), None)
-            if at_seg:
-                user_id_to_query = str(at_seg.qq)
-            else:
-                match = re.search(r"(\d+)", event.message_str)
-                if match:
-                    user_id_to_query = match.group(1)
+            try:
+                user_id_to_query, _ = self._parse_count_target(event, "画图查询次数")
+            except ValueError as exc:
+                yield event.plain_result(str(exc))
+                event.stop_event()
+                return
         user_count = p.persistence.get_user_count(user_id_to_query)
         reply_msg = f"用户 {user_id_to_query} 个人剩余次数为: {user_count}"
         if user_id_to_query == event.get_sender_id():

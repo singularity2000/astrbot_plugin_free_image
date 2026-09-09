@@ -162,7 +162,7 @@ class ImageHistoryCache:
         async with self._lock:
             result = self._cleanup_cache_locked(reason=reason, clear_all=True)
             logger.info(
-                f"[FreeImage Cache] 已清理全部缓存：删除 {result['deleted_count']} 张，"
+                f"[FreeImage Cache] 已清理普通缓存（保留收藏）：删除 {result['deleted_count']} 张，"
                 f"释放 {format_size(result['deleted_bytes'])}。"
             )
             return result
@@ -185,6 +185,37 @@ class ImageHistoryCache:
                     f"{target_id}，释放 {format_size(result['deleted_bytes'])}。"
                 )
             return result
+
+    async def set_favorite(self, cache_id: str, favorite: bool) -> bool:
+        """收藏属于图片本身；所有 Pages 用户共享保护状态。"""
+        async with self._lock:
+            self._sync_cache_existence()
+            for item in self.cache_images:
+                if item.get("id") == cache_id:
+                    item["favorite"] = favorite
+                    self._save_cache_index()
+                    return True
+            return False
+
+    async def delete_history_records(self, record_ids: list[str]) -> dict[str, Any]:
+        """显式删除记录及图片（含收藏）；文件删除失败时保留对应记录。"""
+        async with self._lock:
+            targets = set(record_ids)
+            records = [record for record in self.records if record.get("id") in targets]
+            cache_ids = {str(cid) for record in records for cid in (record.get("cache_ids") or [])}
+            cache_ids.update(str(item["id"]) for item in self.cache_images
+                             if item.get("record_id") in targets and item.get("id"))
+            cleanup = self._delete_cache_ids_locked(cache_ids, reason="history")
+            failed_ids = set(cleanup.get("failed_ids", []))
+            failed_records = {record["id"] for record in records
+                              if failed_ids.intersection(record.get("cache_ids") or [])}
+            failed_records.update(item.get("record_id") for item in self.cache_images
+                                  if item.get("id") in failed_ids)
+            deleted_records = {record["id"] for record in records} - failed_records
+            self.records = [record for record in self.records if record.get("id") not in deleted_records]
+            self._save_history()
+            return {**cleanup, "deleted_records": len(deleted_records),
+                    "failed_records": len(failed_records.intersection(targets))}
 
     async def enforce_limits(self, *, reason: str = "startup") -> dict[str, Any]:
         async with self._lock:
@@ -240,7 +271,7 @@ class ImageHistoryCache:
             }
 
     async def get_cache_for_page(
-        self, *, page: int = 1, page_size: int = 24
+        self, *, page: int = 1, page_size: int = 24, favorites_only: bool = False
     ) -> dict[str, Any]:
         async with self._lock:
             self._sync_cache_existence()
@@ -249,6 +280,11 @@ class ImageHistoryCache:
                 for item in reversed(self.cache_images)
                 if (page_item := self._cache_entry_for_page(item))
             ]
+            favorite_images = [item for item in images_all if item.get("favorite") is True]
+            regular_images = [item for item in images_all if item.get("favorite") is not True]
+            all_count = len(images_all)
+            if favorites_only:
+                images_all = favorite_images
             total_count = len(images_all)
             page, page_size, total_pages, start, end = self._page_window(
                 page, page_size, total_count
@@ -263,6 +299,11 @@ class ImageHistoryCache:
                 "total_pages": total_pages,
                 "total_count": total_count,
                 "total_bytes": sum(int(item.get("size_bytes") or 0) for item in self.cache_images),
+                "all_count": all_count,
+                "favorite_count": len(favorite_images),
+                "favorite_bytes": sum(int(item.get("size_bytes") or 0) for item in favorite_images),
+                "regular_count": len(regular_images),
+                "regular_bytes": sum(int(item.get("size_bytes") or 0) for item in regular_images),
                 "images": images_all[start:end],
             }
 
@@ -303,8 +344,15 @@ class ImageHistoryCache:
         mode = normalize_history_mode(filters.get("mode"))
         model = str(filters.get("model") or "").strip()
 
+        keyword = str(filters.get("keyword") or "").strip().casefold()
+        favorites_only = filters.get("favorites_only") is True
+        favorite_ids = {item.get("id") for item in self.cache_images if item.get("favorite") is True}
         result: list[dict[str, Any]] = []
         for record in records:
+            if keyword and keyword not in str(record.get("prompt") or "").casefold():
+                continue
+            if favorites_only and not favorite_ids.intersection(record.get("cache_ids") or []):
+                continue
             date = self._history_record_date(record)
             if start and date < start:
                 continue
@@ -320,7 +368,7 @@ class ImageHistoryCache:
         return result
 
     @staticmethod
-    def _top_counts(records: list[dict[str, Any]], key: str, limit: int = 8) -> list[list[Any]]:
+    def _top_counts(records: list[dict[str, Any]], key: str) -> list[list[Any]]:
         counts: dict[str, int] = {}
         for record in records:
             value = (
@@ -332,7 +380,7 @@ class ImageHistoryCache:
             counts[value] = counts.get(value, 0) + 1
         return [
             [value, count]
-            for value, count in sorted(counts.items(), key=lambda item: item[1], reverse=True)[:limit]
+            for value, count in sorted(counts.items(), key=lambda item: item[1], reverse=True)
         ]
 
     def _history_stats(self, records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -405,6 +453,12 @@ class ImageHistoryCache:
                 last_tab = str(updates.get("last_tab") or "").strip()
                 if last_tab in PAGE_TABS:
                     prefs["last_tab"] = last_tab
+            for key in ("mode_chart_height", "model_chart_height"):
+                if key in updates:
+                    try:
+                        prefs[key] = max(140, min(800, int(updates[key])))
+                    except (TypeError, ValueError, OverflowError):
+                        pass
             self._set_prefs_for_user(username, prefs)
             self._save_page_prefs()
             return dict(prefs)
@@ -430,25 +484,27 @@ class ImageHistoryCache:
         self._sync_cache_existence()
         to_delete: set[str] = set()
 
+        # 收藏既不作为清理目标，也不参与数量/体积的额度计算。
+        regular_images = [item for item in self.cache_images if item.get("favorite") is not True]
         if clear_all:
-            to_delete.update(str(item.get("id")) for item in self.cache_images if item.get("id"))
+            to_delete.update(str(item.get("id")) for item in regular_images if item.get("id"))
         else:
             max_age_hours = self._positive_float("image_cache_max_age_hours")
             if max_age_hours is not None:
                 cutoff = datetime.now() - timedelta(hours=max_age_hours)
-                for item in self.cache_images:
+                for item in regular_images:
                     created_at = self._parse_datetime(item.get("created_at"))
                     if created_at and created_at < cutoff:
                         to_delete.add(str(item.get("id")))
 
-            remaining = [item for item in self.cache_images if item.get("id") not in to_delete]
+            remaining = [item for item in regular_images if item.get("id") not in to_delete]
             max_count = self._positive_int("image_cache_max_count")
             if max_count is not None and len(remaining) > max_count:
                 overflow = len(remaining) - max_count
                 for item in self._oldest_first(remaining)[:overflow]:
                     to_delete.add(str(item.get("id")))
 
-            remaining = [item for item in self.cache_images if item.get("id") not in to_delete]
+            remaining = [item for item in regular_images if item.get("id") not in to_delete]
             max_mb = self._positive_float("image_cache_max_size_mb")
             if max_mb is not None:
                 max_bytes = int(max_mb * 1024 * 1024)
@@ -466,6 +522,7 @@ class ImageHistoryCache:
         if not deleted_count and (clear_all or self.cache_index_file.exists() or self.cache_images):
             self._save_cache_index()
         return {
+            **result,
             "reason": reason,
             "deleted_count": deleted_count,
             "deleted_bytes": deleted_bytes,
@@ -494,28 +551,23 @@ class ImageHistoryCache:
 
         kept: list[dict[str, Any]] = []
         deleted_ids: set[str] = set()
+        failed_ids: list[str] = []
         for item in self.cache_images:
             item_id = str(item.get("id") or "")
             if item_id in target_ids:
+                if not self._safe_unlink(self._entry_path(item)):
+                    failed_ids.append(item_id)
+                    kept.append(item)
+                    continue
                 deleted_ids.add(item_id)
                 deleted_count += 1
                 deleted_bytes += int(item.get("size_bytes") or 0)
-                self._safe_unlink(self._entry_path(item))
             else:
                 kept.append(item)
 
-        if not deleted_ids:
-            return {
-                "reason": reason,
-                "deleted_count": 0,
-                "deleted_bytes": 0,
-                "remaining_count": len(self.cache_images),
-                "remaining_bytes": sum(int(item.get("size_bytes") or 0) for item in self.cache_images),
-            }
-
         self.cache_images = kept
         history_changed = self._remove_cache_ids_from_history(deleted_ids)
-        if save_when_empty or deleted_count or self.cache_index_file.exists() or self.cache_images:
+        if save_when_empty or deleted_count:
             self._save_cache_index()
         if history_changed:
             self._save_history()
@@ -523,6 +575,8 @@ class ImageHistoryCache:
             "reason": reason,
             "deleted_count": deleted_count,
             "deleted_bytes": deleted_bytes,
+            "failed_ids": failed_ids,
+            "failed_count": len(failed_ids),
             "remaining_count": len(self.cache_images),
             "remaining_bytes": sum(int(item.get("size_bytes") or 0) for item in self.cache_images),
         }
@@ -613,19 +667,21 @@ class ImageHistoryCache:
             return None
         return path
 
-    def _safe_unlink(self, path: Path | None) -> None:
+    def _safe_unlink(self, path: Path | None) -> bool:
         if not path:
-            return
+            return False
         try:
             resolved = path.resolve()
             cache_root = self.cache_dir.resolve()
             if cache_root not in resolved.parents and resolved != cache_root:
                 logger.warning(f"[FreeImage Cache] 跳过异常缓存路径: {resolved}")
-                return
-            if resolved.is_file():
+                return False
+            if resolved.exists():
                 resolved.unlink()
+            return True
         except OSError as exc:
             logger.warning(f"[FreeImage Cache] 删除缓存失败: {path} - {exc}")
+            return False
 
     def _read_json(self, path: Path, fallback: dict[str, Any]) -> dict[str, Any]:
         if not path.exists():

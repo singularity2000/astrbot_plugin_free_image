@@ -436,15 +436,6 @@ label {
   position: relative;
 }
 
-.rail-line {
-  position: absolute;
-  top: 18px;
-  bottom: 18px;
-  left: 17px;
-  width: 2px;
-  background: linear-gradient(var(--green), var(--amber), var(--coral));
-}
-
 .stack-list {
   display: grid;
   gap: 12px;
@@ -1569,3 +1560,105 @@ label {
 .node-title .title-text strong { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .node-title .node-summary { display: block; width: 100%; min-width: 0; margin-top: 3px; }
 @media (max-width: 720px) { .node-title .node-summary { font-size: .72rem; } }
+
+/* 统计管理：复用当前主题与控件，只增加操作所需的空间。 */
+#pipeline-list { padding-left: 0; }
+.chart-panel { display: flex; flex-direction: column; height: 240px; min-height: 140px; max-height: 800px; padding-bottom: 0; }
+.chart-panel .panel-title { flex: 0 0 auto; }
+.chart-panel .bars { display: grid; align-content: start; overflow-y: auto; min-height: 0; flex: 1 1 auto; padding-right: 6px; overscroll-behavior: contain; }
+.bar-row > span { min-width: 0; overflow-wrap: anywhere; }
+.chart-resizer { flex: 0 0 18px; cursor: ns-resize; touch-action: none; display: grid; place-items: center; margin: 0 -8px; }
+.chart-resizer::after { content: ""; width: 38px; height: 3px; border-radius: 3px; background: var(--line); }
+.chart-resizer:hover::after, .chart-resizer.dragging::after { background: var(--cyan); }
+.chart-resizer:focus-visible, .favorite-button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.check-label { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+.check-label input[type="checkbox"], .selection-cell input[type="checkbox"] { width: 16px; height: 16px; min-width: 16px; margin: 0; accent-color: var(--green); cursor: pointer; }
+.selection-cell { width: 36px; text-align: center; }
+.history-actions { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 12px; color: var(--muted); font-size: 12px; }
+#filter-keyword { flex: 1 1 190px; min-width: 150px; }
+.cache-protection-hint { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 10px 0; }
+.favorite-button { position: absolute; top: 8px; left: 8px; z-index: 3; display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 1px solid rgba(255,255,255,.45); border-radius: 50%; background: rgba(15,20,27,.8); color: #fff; font-size: 23px; line-height: 1; cursor: pointer; }
+.favorite-button.is-favorite { color: #ffd166; }
+.favorite-button:disabled { opacity: .55; cursor: wait; }
+.slide-favorite { position: absolute; top: 20px; left: 20px; width: 42px; height: 42px; font-size: 29px; z-index: 5; }
+.favorite-button[hidden] { display: none; }
+@media (max-width: 600px) {
+  .chart-panel .bar-row { grid-template-columns: minmax(70px, 110px) minmax(0, 1fr) 36px; gap: 6px; }
+  .cache-strip { flex-wrap: wrap; }
+}
+
+/* 隐藏的缓存开关不能继承全宽输入框尺寸，否则会撑出横向空白。 */
+#cache-enabled { width: 1px; height: 1px; }
+
+/* 搜索与条件分层排列，每页条数置于搜索行，不再依赖零散控件自然换行。 */
+.history-filter-panel {
+  display: grid;
+  gap: 18px;
+  padding: 18px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+.history-search-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+}
+.history-search-field { position: relative; min-width: 0; }
+.history-search-field svg {
+  position: absolute;
+  left: 13px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  pointer-events: none;
+}
+.history-filter-panel #filter-keyword {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  height: 40px;
+  padding-left: 40px;
+}
+.history-favorite-filter {
+  height: 40px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.history-favorite-filter:has(input:checked) {
+  color: var(--green);
+  border-color: var(--green);
+  background: var(--panel-accent-soft);
+}
+.history-filter-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.15fr) minmax(0, 1fr) minmax(0, 1.35fr);
+  align-items: end;
+  gap: 14px;
+}
+.history-filter-field { display: grid; gap: 8px; min-width: 0; }
+.history-filter-panel .history-filter-field input,
+.history-filter-panel .history-filter-field select {
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  height: 38px;
+}
+.history-search-row .page-size-control { min-width: 0; white-space: nowrap; gap: 8px; }
+.history-search-row .page-size-control select { width: 70px; height: 40px; }
+@media (max-width: 1000px) {
+  .history-filter-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .history-filter-field:last-child { grid-column: 1 / -1; }
+}
+@media (max-width: 540px) {
+  .history-filter-panel { padding: 14px; gap: 16px; }
+  .history-search-row { grid-template-columns: auto minmax(0, 1fr); gap: 10px; }
+  .history-search-field { grid-column: 1 / -1; }
+  .history-favorite-filter { justify-content: center; }
+  .history-filter-fields { gap: 14px 10px; }
+  .history-actions { flex-wrap: wrap; }
+}

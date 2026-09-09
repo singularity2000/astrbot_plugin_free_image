@@ -5,15 +5,17 @@ from typing import Any, Dict, List, Optional, Union
 
 from astrbot import logger
 
-from .base import BaseProvider
+from .base import BaseProvider, ReferenceLogContext
 
 
 class GeminiProvider(BaseProvider):
     """Gemini 原生 API（/v1beta/models/{model}:generateContent）。"""
 
     async def generate(
-        self, image_bytes_list: List[bytes], prompt: str
+        self, image_bytes_list: List[bytes], prompt: str,
+        *, request_log: ReferenceLogContext | None = None,
     ) -> Union[bytes, list[bytes], str]:
+        request_log = request_log or ReferenceLogContext(original_count=len(image_bytes_list))
         api_url = self.node.get("api_url")
         model_name = self.node.get("model", "gemini-3.1-flash-image-preview")
         if not api_url:
@@ -36,6 +38,10 @@ class GeminiProvider(BaseProvider):
             }
 
             try:
+                self._log_image_request(
+                    request_log, received_count=len(image_bytes_list),
+                    sent_count=sum("inlineData" in part for part in context["contents"][0]["parts"]), attempt_no=attempt_no,
+                )
                 async with self.iwf.session.post(
                     url,
                     json=context,

@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import datetime
 from typing import List, Optional, Union
 
@@ -6,7 +7,7 @@ from astrbot import logger
 from astrbot.core import AstrBotConfig
 
 from .providers import BaseProvider, create_provider
-from .providers.base import node_display_name
+from .providers.base import PipelineAttemptProgress, ReferenceLogContext, node_display_name
 from .workflow import ImageWorkflow
 
 
@@ -58,6 +59,7 @@ class ImageGenPipeline:
         prompt: str,
         model_index: Optional[int] = None,
         generation_mode: Optional[str] = None,
+        request_log: ReferenceLogContext | None = None,
     ) -> tuple[Union[bytes, list[bytes], str, dict[str, str]], Optional[str]]:
         """
         依次调用管线中已启用的 Provider。
@@ -67,6 +69,9 @@ class ImageGenPipeline:
         当 model_index 不为 None 时，只调用指定序号（1-based）的 Provider，不回退。
         调用方应已在调用前校验过序号范围和 enabled 状态；此处再做二次防御。
         """
+        request_log = request_log or ReferenceLogContext(
+            original_count=len(image_bytes_list), mode=generation_mode or ""
+        )
         if model_index is not None:
             if model_index < 1 or model_index > len(self.providers):
                 return (
@@ -84,19 +89,31 @@ class ImageGenPipeline:
                     f"模型 {model_index} 不支持{self._capability_label(generation_mode)}，请指定其他模型。",
                     None,
                 )
+            progress = PipelineAttemptProgress(budget=max(0, provider.max_retry))
+            request_log = replace(request_log, attempt_progress=progress)
+            progress.start_node()
             logger.info(f"[Pipeline] 指定模型: {provider.log_label}")
-            result = await provider.generate(image_bytes_list, prompt)
+            result = await provider.generate(image_bytes_list, prompt, request_log=request_log)
             if isinstance(result, (bytes, list, dict)):
                 return result, node_display_name(provider.node)
             logger.warning(f"[Pipeline] 指定模型 {provider.log_label} 失败: {result}")
             return f"指定模型 {provider.label} 失败: {result}", None
 
+        # 仅快照日志分母；下方节点选择与 Provider 重试仍按原逻辑执行。
+        budget = sum(
+            max(0, provider.max_retry) for provider in self.providers
+            if provider.enabled and provider.supports_capability(generation_mode)
+        )
+        progress = PipelineAttemptProgress(budget=budget)
+        request_log = replace(request_log, attempt_progress=progress)
+
         errors: List[str] = []
         for provider in self.providers:
             if not provider.enabled or not provider.supports_capability(generation_mode):
                 continue
+            progress.start_node()
             logger.info(f"[Pipeline] 尝试: {provider.log_label}")
-            result = await provider.generate(image_bytes_list, prompt)
+            result = await provider.generate(image_bytes_list, prompt, request_log=request_log)
             if isinstance(result, (bytes, list, dict)):
                 logger.info(f"[Pipeline] 成功: {provider.log_label}")
                 return result, node_display_name(provider.node)

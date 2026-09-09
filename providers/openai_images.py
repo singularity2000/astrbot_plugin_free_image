@@ -8,7 +8,7 @@ from PIL import Image as PILImage
 
 from astrbot import logger
 
-from .base import BaseProvider
+from .base import BaseProvider, ReferenceLogContext
 
 
 class OpenAIImagesProvider(BaseProvider):
@@ -68,8 +68,10 @@ class OpenAIImagesProvider(BaseProvider):
         return "auto"
 
     async def generate(
-        self, image_bytes_list: List[bytes], prompt: str
+        self, image_bytes_list: List[bytes], prompt: str,
+        *, request_log: ReferenceLogContext | None = None,
     ) -> Union[bytes, list[bytes], str]:
+        request_log = request_log or ReferenceLogContext(original_count=len(image_bytes_list))
         api_url = self.node.get("api_url")
         model_name = self.node.get("model")
         if not api_url:
@@ -94,6 +96,10 @@ class OpenAIImagesProvider(BaseProvider):
                 if image_bytes_list:
                     data = self._build_edits_form(model_name, prompt, image_bytes_list, n, size)
                     endpoint = self._build_api_url(str(api_url), "edits")
+                    self._log_image_request(
+                        request_log, received_count=len(image_bytes_list),
+                        sent_count=len(image_bytes_list), attempt_no=attempt_no,
+                    )
                     async with self.iwf.session.post(
                         endpoint,
                         data=data,
@@ -106,6 +112,10 @@ class OpenAIImagesProvider(BaseProvider):
                 else:
                     endpoint = self._build_api_url(str(api_url), "generations")
                     payload = {"model": model_name, "prompt": prompt, "n": n, "size": size}
+                    self._log_image_request(
+                        request_log, received_count=len(image_bytes_list),
+                        sent_count=0, attempt_no=attempt_no,
+                    )
                     async with self.iwf.session.post(
                         endpoint,
                         json=payload,
@@ -139,9 +149,6 @@ class OpenAIImagesProvider(BaseProvider):
         self, model_name: str, prompt: str, image_bytes_list: list[bytes],
         n: int = 1, size: str = "auto",
     ) -> FormData:
-        logger.info(
-            f"[OpenAIImages] 正在请求 /images/edits，上传参考图 {len(image_bytes_list)} 张"
-        )
         form = FormData()
         form.add_field("model", model_name)
         form.add_field("prompt", prompt)

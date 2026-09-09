@@ -2,7 +2,7 @@ import asyncio
 import base64
 from typing import Any, Dict, List, Union
 
-from .base import BaseProvider
+from .base import BaseProvider, ReferenceLogContext
 
 
 class GenericImageProvider(BaseProvider):
@@ -15,8 +15,10 @@ class GenericImageProvider(BaseProvider):
     DATA_FORM = {"siliconflow": "images", "bigmodel": "data"}
 
     async def generate(
-        self, image_bytes_list: List[bytes], prompt: str
+        self, image_bytes_list: List[bytes], prompt: str,
+        *, request_log: ReferenceLogContext | None = None,
     ) -> Union[bytes, list[bytes], str]:
+        request_log = request_log or ReferenceLogContext(original_count=len(image_bytes_list))
         api_url = self.node.get("api_url")
         if not api_url:
             return "配置错误 - 未设置 API URL"
@@ -47,6 +49,10 @@ class GenericImageProvider(BaseProvider):
             }
 
             try:
+                self._log_image_request(
+                    request_log, received_count=len(image_bytes_list),
+                    sent_count=sum(key in payload for key in ("image", "image2", "image3")), attempt_no=attempt_no,
+                )
                 async with self.iwf.session.post(
                     api_url,
                     json=payload,

@@ -2,15 +2,17 @@ import asyncio
 import base64
 from typing import List, Union
 
-from .base import BaseProvider
+from .base import BaseProvider, ReferenceLogContext
 
 
 class OpenAIResponsesProvider(BaseProvider):
     """兼容 OpenAI /v1/responses 端点。"""
 
     async def generate(
-        self, image_bytes_list: List[bytes], prompt: str
+        self, image_bytes_list: List[bytes], prompt: str,
+        *, request_log: ReferenceLogContext | None = None,
     ) -> Union[bytes, list[bytes], str]:
+        request_log = request_log or ReferenceLogContext(original_count=len(image_bytes_list))
         api_url = self.node.get("api_url")
         model_name = self.node.get("model")
 
@@ -39,6 +41,10 @@ class OpenAIResponsesProvider(BaseProvider):
             resource_exhausted = False
 
             try:
+                self._log_image_request(
+                    request_log, received_count=len(image_bytes_list),
+                    sent_count=sum(part.get("type") == "input_image" for part in content_items), attempt_no=attempt_no,
+                )
                 async with self.iwf.session.post(
                     api_url,
                     json=payload,

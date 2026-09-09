@@ -62,7 +62,6 @@
             </div>
           </div>
           <div class="rail-board">
-            <div class="rail-line" aria-hidden="true"></div>
             <div id="pipeline-list" class="stack-list"></div>
           </div>
         </section>
@@ -136,35 +135,47 @@
             <div class="metric"><span id="metric-users">0</span><small>触发人</small></div>
           </div>
           <div class="analytics-grid">
-            <div class="chart-panel">
+            <div class="chart-panel" id="mode-chart">
               <div class="panel-title">模式分布</div>
-              <div id="mode-bars" class="bars"></div>
+              <div id="mode-bars" class="bars" tabindex="0" aria-label="模式分布内容"></div>
+              <div class="chart-resizer" data-chart="mode" role="separator" tabindex="0" aria-orientation="horizontal" aria-valuemin="140" aria-valuemax="800" aria-valuenow="240" aria-label="调整模式分布高度" title="拖动调整高度，也可使用上下方向键"></div>
             </div>
-            <div class="chart-panel">
+            <div class="chart-panel" id="model-chart">
               <div class="panel-title">模型分布</div>
-              <div id="model-bars" class="bars"></div>
+              <div id="model-bars" class="bars" tabindex="0" aria-label="模型分布内容"></div>
+              <div class="chart-resizer" data-chart="model" role="separator" tabindex="0" aria-orientation="horizontal" aria-valuemin="140" aria-valuemax="800" aria-valuenow="240" aria-label="调整模型分布高度" title="拖动调整高度，也可使用上下方向键"></div>
             </div>
           </div>
-          <div class="filter-bar">
-            <input id="filter-start" type="date" />
-            <input id="filter-end" type="date" />
-            <select id="filter-user"></select>
-            <select id="filter-mode"></select>
-            <select id="filter-model"></select>
-            <label class="page-size-control">每页
-              <select id="history-page-size">
-                <option>10</option>
-                <option>20</option>
-                <option>50</option>
-                <option>100</option>
-              </select>
-            </label>
-            <button class="btn" id="apply-filters" type="button">筛选</button>
+          <div class="filter-bar history-filter-panel">
+            <div class="history-search-row">
+              <div class="history-search-field">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m16 16 4.5 4.5"></path></svg>
+                <input id="filter-keyword" type="search" placeholder="搜索提示词关键词…" aria-label="搜索提示词关键词" />
+              </div>
+              <label class="page-size-control">每页
+                <select id="history-page-size" aria-label="每页生图记录条数">
+                  <option>10</option>
+                  <option>20</option>
+                  <option>50</option>
+                  <option>100</option>
+                </select>
+                <span>条</span>
+              </label>
+              <label class="check-label history-favorite-filter"><input id="filter-favorites" type="checkbox" /><span>仅看收藏</span></label>
+            </div>
+            <div class="history-filter-fields">
+              <label class="history-filter-field"><span>开始日期</span><input id="filter-start" type="date" /></label>
+              <label class="history-filter-field"><span>结束日期</span><input id="filter-end" type="date" /></label>
+              <label class="history-filter-field"><span>触发用户</span><select id="filter-user"></select></label>
+              <label class="history-filter-field"><span>生成模式</span><select id="filter-mode"></select></label>
+              <label class="history-filter-field"><span>使用模型</span><select id="filter-model"></select></label>
+            </div>
           </div>
           <div class="table-wrap">
             <table class="data-table">
               <thead>
                 <tr>
+                  <th class="selection-cell"><input id="history-select-all" type="checkbox" aria-label="全选本页记录" /></th>
                   <th>时间</th>
                   <th>触发人</th>
                   <th>模式</th>
@@ -176,6 +187,10 @@
               </thead>
               <tbody id="history-body"></tbody>
             </table>
+          </div>
+          <div class="history-actions">
+            <span id="history-selected-count" aria-live="polite">已选 0 条（仅当前页）</span>
+            <button class="btn danger" id="delete-history" type="button" disabled>删除所选</button>
           </div>
           <nav class="pager history-pager" id="history-pager" aria-label="生图统计分页">
             <div class="pager-controls">
@@ -204,7 +219,7 @@
                 <span class="switch-ui"></span>
                 <span>保存缓存</span>
               </label>
-              <button class="btn danger" id="clear-cache" type="button">清理缓存</button>
+              <button class="btn danger" id="clear-cache" type="button">清理普通缓存</button>
             </div>
           </div>
           <div class="cache-settings">
@@ -212,9 +227,13 @@
             <label>最长小时<input id="cache-max-hours" type="number" min="0" step="1" /></label>
             <label>最多张数<input id="cache-max-count" type="number" min="0" step="1" /></label>
           </div>
+          <p class="cache-protection-hint">收藏图片不计入自动清理限制；一键清理保留收藏。取消收藏后将重新受限制约束。</p>
           <div class="cache-strip">
             <div><strong id="cache-total">0</strong><span>张图片</span></div>
             <div><strong id="cache-size">0 KB</strong><span>占用空间</span></div>
+            <div><strong id="cache-regular-summary">0 张 / 0 B</strong><span>普通缓存（受限额约束）</span></div>
+            <div><strong id="cache-favorite-summary">0 张 / 0 B</strong><span>收藏（不计入限额）</span></div>
+            <label class="check-label"><input id="cache-favorites" type="checkbox" />仅看收藏</label>
             <label>每页
               <select id="cache-page-size">
                 <option>12</option>
@@ -278,6 +297,7 @@
     </div>
 
     <div id="slideshow" class="slideshow" aria-hidden="true">
+      <button class="favorite-button slide-favorite" id="slide-favorite" type="button" hidden aria-label="收藏图片" aria-pressed="false">☆</button>
       <button class="slide-close" id="slide-close" type="button">×</button>
       <button class="slide-nav prev" id="slide-prev" type="button">‹</button>
       <figure class="slide-figure" id="slide-figure" data-slide-state="loading">

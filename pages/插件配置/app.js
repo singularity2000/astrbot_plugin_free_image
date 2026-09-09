@@ -74,6 +74,9 @@ const state = {
   historyTotal: 0,
   historyTotalPages: 1,
   historyLoading: false,
+  selectedHistory: new Set(),
+  deletingHistory: false,
+  favoritePending: new Set(),
   historyStats: null,
   historyFacets: {
     modes: [],
@@ -784,12 +787,12 @@ function bindSortable(container, type) {
 }
 
 function pipelineSummaryText(node) {
-  const status = node.enabled === false ? "已关闭" : "启用中";
   const model = node.model || node.__template_key || "";
   const capabilities = Array.isArray(node.capabilities) && node.capabilities.length ? node.capabilities : ["text2image", "image2image"];
   const capabilityText = capabilities.map((item) => CAPABILITY_LABELS[item] || item).join(" · ");
   const apiUrl = String(node.api_url || node.vertex_ai_base_api || node.recaptcha_base_api || "").trim();
-  return [status, model, `重试 ${node.max_retry ?? 3}`, capabilityText, apiUrl || "未配置地址"].join("  ·  ");
+  const timeout = node.api_timeout ?? getTemplateMeta(node.__template_key || "").items?.api_timeout?.default ?? 300;
+  return [model, `重试 ${node.max_retry ?? 3} 次`, `${timeout} 秒后超时`, capabilityText, apiUrl || "未配置地址"].join("  ·  ");
 }
 
 function refreshPipelineNodeSummary(index) {
@@ -1145,6 +1148,7 @@ function updateHistoryFilters(records) {
 }
 
 function applyHistoryFilters() {
+  window.clearTimeout(historyFilterTimer);
   void loadHistory(1);
 }
 
@@ -1159,7 +1163,7 @@ function groupCounts(records, key) {
     const value = record[key] || "未记录";
     counts.set(value, (counts.get(value) || 0) + 1);
   });
-  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]);
 }
 
 function renderBars(containerId, groups, labelFormatter = (value) => value) {
@@ -1179,7 +1183,7 @@ function renderBars(containerId, groups, labelFormatter = (value) => value) {
   `).join("");
 }
 
-function slideInfoHtml(item) {
+function slideInfoHtml(item, dimensions = "") {
   const prompt = item.prompt ? `<br><span>${escapeHtml(item.prompt)}</span>` : "";
   const trigger = formatTriggerLabel(item);
   const meta = [
@@ -1188,6 +1192,7 @@ function slideInfoHtml(item) {
     item.elapsed ? `${Number(item.elapsed).toFixed(1)}s` : "-",
     formatDate(item.created_at),
   ];
+  if (dimensions) meta.push(dimensions);
   if (item.size_bytes) meta.push(formatBytes(item.size_bytes));
   return `
     <strong>${escapeHtml(meta[0])}</strong>
@@ -1301,6 +1306,150 @@ function bindPager(kind, loadPage) {
   input?.addEventListener("blur", normalizeInput);
 }
 
+function updateHistorySelection() {
+  const busy = state.historyLoading || state.deletingHistory;
+  const count = state.selectedHistory.size;
+  const all = byId("history-select-all");
+  all.checked = state.history.length > 0 && count === state.history.length;
+  all.indeterminate = count > 0 && count < state.history.length;
+  all.disabled = busy || !state.history.length;
+  byId("history-selected-count").textContent = `已选 ${count} 条（仅当前页）`;
+  byId("delete-history").disabled = busy || !count;
+  byId("history-body").querySelectorAll("[data-history-id]").forEach((input) => {
+    input.checked = state.selectedHistory.has(input.dataset.historyId);
+    input.disabled = busy;
+  });
+}
+
+async function deleteSelectedHistory() {
+  if (state.deletingHistory || state.historyLoading || !state.selectedHistory.size) return;
+  const ids = [...state.selectedHistory];
+  const records = state.history.filter((item) => state.selectedHistory.has(item.id));
+  const images = records.flatMap((record) => record.cache_items || []);
+  const favorites = images.filter((item) => item.favorite).length;
+  state.deletingHistory = true;
+  updateHistorySelection();
+  try {
+    const confirmed = await askConfirm({
+      title: "删除生图记录及图片",
+      message: `将删除所选的 ${ids.length} 条生图记录及其关联的 ${images.length} 张本地图片。${favorites ? `其中包含 ${favorites} 张收藏图片，也将删除。` : ""}此操作不可撤销。`,
+      confirmText: "删除",
+    });
+    if (!confirmed) return;
+    const result = await callApi("删除生图记录", () => bridge.apiPost("delete_history_records", { record_ids: ids }));
+    // 删除异常也刷新：请求可能已部分完成，不保留过期的勾选状态。
+    images.forEach((image) => {
+      previewMemoryCache.delete(`thumb:${image.id}`);
+      previewMemoryCache.delete(`full:${image.id}`);
+    });
+    closeSlideshow();
+    await Promise.all([loadHistory(), loadCache()]);
+    if (result?.success === false) return;
+    const cleanup = result.cleanup || {};
+    showToast(`已删除 ${cleanup.deleted_records || 0} 条记录、${cleanup.deleted_count || 0} 张图片。${cleanup.failed_count ? `另有 ${cleanup.failed_count} 张图片删除失败，相关记录已保留，请检查文件占用或权限。` : ""}`, cleanup.failed_count ? "error" : "success");
+  } finally {
+    state.deletingHistory = false;
+    updateHistorySelection();
+  }
+}
+
+function favoriteButtonHtml(image) {
+  const favorite = image.favorite === true;
+  return `<button class="favorite-button ${favorite ? "is-favorite" : ""}" data-action="image-favorite" data-cache-id="${attrHtml(image.id)}" type="button" title="${favorite ? "取消收藏（重新受缓存限制约束）" : "收藏图片（保留，不参与自动清理）"}" aria-label="${favorite ? "取消收藏图片" : "收藏图片"}" aria-pressed="${favorite}" ${state.favoritePending.has(image.id) ? "disabled" : ""}>${favorite ? "★" : "☆"}</button>`;
+}
+
+function updateSlideFavorite() {
+  const button = byId("slide-favorite");
+  const image = state.slideItems[state.slideIndex];
+  button.hidden = !image || image.preview_kind === "persona" || !image.id;
+  if (button.hidden) return;
+  button.textContent = image.favorite ? "★" : "☆";
+  button.classList.toggle("is-favorite", Boolean(image.favorite));
+  button.setAttribute("aria-pressed", String(Boolean(image.favorite)));
+  button.setAttribute("aria-label", image.favorite ? "取消收藏图片" : "收藏图片");
+  button.title = image.favorite ? "取消收藏（重新受缓存限制约束）" : "收藏图片（不参与自动清理）";
+  button.disabled = state.favoritePending.has(image.id);
+}
+
+async function toggleImageFavorite(cacheId) {
+  if (state.favoritePending.has(cacheId)) return;
+  const images = [...state.slideItems, ...(state.cache.images || []), ...historySlideItems(state.history)];
+  const image = images.find((item) => item.id === cacheId && item.preview_kind !== "persona");
+  if (!image) return;
+  state.favoritePending.add(cacheId);
+  const favorite = !image.favorite;
+  renderCacheGrid();
+  updateSlideFavorite();
+  try {
+    const result = await callApi("保存收藏", () => bridge.apiPost("set_image_favorite", { cache_id: cacheId, favorite }));
+    if (result?.success === false) return;
+    // 幻灯片保留当前浏览位置，仅更新状态；筛选列表重新从后台读取。
+    images.forEach((item) => { if (item.id === cacheId) item.favorite = favorite; });
+    state.history.forEach((record) => (record.cache_items || []).forEach((item) => {
+      if (item.id === cacheId) item.favorite = favorite;
+    }));
+    updateSlideFavorite();
+    await Promise.all([loadCache(), loadHistory()]);
+    showToast(favorite ? "已收藏，图片不会参与自动清理。" : "已取消收藏，图片重新受缓存限制约束。");
+  } finally {
+    state.favoritePending.delete(cacheId);
+    renderCacheGrid();
+    updateSlideFavorite();
+  }
+}
+
+function setChartHeight(kind, height) {
+  const value = Math.max(140, Math.min(800, Math.round(Number(height) || 240)));
+  byId(`${kind}-chart`).style.height = `${value}px`;
+  const handle = document.querySelector(`[data-chart="${kind}"]`);
+  handle.setAttribute("aria-valuenow", String(value));
+  state.pagePrefs[`${kind}_chart_height`] = value;
+  return value;
+}
+
+function applyChartHeights() {
+  for (const kind of ["mode", "model"]) setChartHeight(kind, state.pagePrefs[`${kind}_chart_height`]);
+}
+
+function bindChartResize() {
+  document.querySelectorAll(".chart-resizer").forEach((handle) => {
+    const kind = handle.dataset.chart;
+    let drag = null;
+    const save = () => {
+      // 读取实际高度，避免前一次偏好保存的迟到响应覆盖本次拖动值。
+      const height = Number(handle.getAttribute("aria-valuenow"));
+      void persistPagePrefs({ [`${kind}_chart_height`]: height });
+    };
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      drag = { y: event.clientY, height: byId(`${kind}-chart`).getBoundingClientRect().height, pointerId: event.pointerId };
+      handle.setPointerCapture(event.pointerId);
+      handle.classList.add("dragging");
+    });
+    handle.addEventListener("pointermove", (event) => {
+      if (drag && drag.pointerId === event.pointerId) setChartHeight(kind, drag.height + event.clientY - drag.y);
+    });
+    const finish = () => {
+      if (!drag) return;
+      drag = null;
+      handle.classList.remove("dragging");
+      save();
+    };
+    handle.addEventListener("pointerup", finish);
+    handle.addEventListener("pointercancel", finish);
+    handle.addEventListener("lostpointercapture", finish);
+    handle.addEventListener("keydown", (event) => {
+      if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const current = state.pagePrefs[`${kind}_chart_height`] || 240;
+      setChartHeight(kind, event.key === "Home" ? 140 : event.key === "End" ? 800 : current + (event.key === "ArrowDown" ? 20 : -20));
+      save();
+    });
+  });
+  applyChartHeights();
+}
+
 function renderHistory() {
   const records = state.filteredHistory;
   renderMetrics(records);
@@ -1316,8 +1465,9 @@ function renderHistory() {
   state.historyPage = Math.min(Math.max(1, state.historyPage), totalPages);
   const pageRecords = records;
   renderPager("history");
+  updateHistorySelection();
   if (!records.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="empty">暂无生图记录。</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="empty">暂无符合条件的生图记录。</td></tr>`;
     return;
   }
   tbody.innerHTML = pageRecords.map((record, offset) => {
@@ -1325,6 +1475,7 @@ function renderHistory() {
     const hasImages = Array.isArray(record.cache_items) && record.cache_items.length > 0;
     return `
       <tr>
+        <td class="selection-cell"><input type="checkbox" data-history-id="${attrHtml(record.id)}" aria-label="选择此条生图记录" ${state.selectedHistory.has(record.id) ? "checked" : ""} ${state.historyLoading || state.deletingHistory ? "disabled" : ""} /></td>
         <td>${escapeHtml(formatDate(record.created_at))}</td>
         <td>${userCellHtml(record)}</td>
         <td>${escapeHtml(modeLabel(record.mode))}</td>
@@ -1355,6 +1506,8 @@ function historyQueryParams(page = state.historyPage, pageSize = state.historyPa
     user: (byId("filter-user")?.value || "").trim(),
     mode: byId("filter-mode")?.value || "",
     model: byId("filter-model")?.value || "",
+    keyword: byId("filter-keyword")?.value.trim() || "",
+    favorites_only: Boolean(byId("filter-favorites")?.checked),
   };
 }
 
@@ -1362,6 +1515,8 @@ async function loadHistory(page = state.historyPage, pageSize = state.historyPag
   setPageStatus("正在加载生图统计…");
   const requestId = ++historyRequestSerial;
   state.historyLoading = true;
+  state.selectedHistory.clear();
+  updateHistorySelection();
   renderPager("history");
   try {
     const result = await callApi("加载生图统计", () => bridge.apiGet("get_history", historyQueryParams(page, pageSize)));
@@ -1388,6 +1543,7 @@ async function loadHistory(page = state.historyPage, pageSize = state.historyPag
   } finally {
     if (requestId === historyRequestSerial) {
       state.historyLoading = false;
+      updateHistorySelection();
       renderPager("history");
     }
   }
@@ -1398,8 +1554,10 @@ function renderCacheSettings() {
   if (byId("cache-max-mb")) byId("cache-max-mb").value = state.cache.max_mb || "";
   if (byId("cache-max-hours")) byId("cache-max-hours").value = state.cache.max_hours || "";
   if (byId("cache-max-count")) byId("cache-max-count").value = state.cache.max_count || "";
-  if (byId("cache-total")) byId("cache-total").textContent = state.cache.total_count || state.cache.images.length || 0;
+  if (byId("cache-total")) byId("cache-total").textContent = state.cache.all_count ?? state.cache.total_count ?? 0;
   if (byId("cache-size")) byId("cache-size").textContent = formatBytes(state.cache.total_bytes || 0);
+  byId("cache-regular-summary").textContent = `${state.cache.regular_count || 0} 张 / ${formatBytes(state.cache.regular_bytes || 0)}`;
+  byId("cache-favorite-summary").textContent = `${state.cache.favorite_count || 0} 张 / ${formatBytes(state.cache.favorite_bytes || 0)}`;
   const sizeSelect = byId("cache-page-size");
   if (sizeSelect) sizeSelect.value = String(normalizeCachePageSize(state.cachePageSize));
 }
@@ -1414,7 +1572,7 @@ function renderCacheGrid() {
   const pageItems = images;
   renderPager("cache");
   if (!pageItems.length) {
-    grid.innerHTML = `<div class="empty">当前没有已保存的缓存图片。</div>`;
+    grid.innerHTML = `<div class="empty">当前没有符合条件的缓存图片。</div>`;
     return;
   }
   grid.innerHTML = pageItems.map((image, offset) => {
@@ -1429,6 +1587,7 @@ function renderCacheGrid() {
         <span class="preview-placeholder">图片未加载成功</span>
         <span class="image-tile-label">${escapeHtml(image.display_name || modeLabel(image.mode))}</span>
       </button>
+      ${favoriteButtonHtml(image)}
       <button class="thumb-action" data-action="cache-image-delete" data-cache-id="${attrHtml(image.id || "")}" type="button" title="删除缓存图片" aria-label="删除缓存图片">×</button>
     </figure>
   `;
@@ -1445,6 +1604,7 @@ async function loadCache(page = state.cachePage, pageSize = state.cachePageSize)
     const result = await callApi("加载缓存", () => bridge.apiGet("get_cache", {
       page,
       page_size: pageSize,
+      favorites_only: Boolean(byId("cache-favorites")?.checked),
     }));
     if (requestId !== cacheRequestSerial) return;
     if (result?.success === false) {
@@ -1462,6 +1622,11 @@ async function loadCache(page = state.cachePage, pageSize = state.cachePageSize)
       max_count: result.max_count || "",
       total_count: Number(result.total_count || 0),
       total_bytes: Number(result.total_bytes || 0),
+      all_count: Number(result.all_count ?? result.total_count ?? 0),
+      regular_count: Number(result.regular_count || 0),
+      regular_bytes: Number(result.regular_bytes || 0),
+      favorite_count: Number(result.favorite_count || 0),
+      favorite_bytes: Number(result.favorite_bytes || 0),
       images: Array.isArray(result.images) ? result.images : [],
     };
     renderCacheGrid();
@@ -1511,8 +1676,8 @@ async function saveCacheConfig(button) {
 
 async function clearCache(button) {
   const confirmed = await askConfirm({
-    title: "清理全部缓存",
-    message: "确定清理全部生图缓存吗？历史记录会保留，但已缓存图片会被删除。",
+    title: "清理普通缓存",
+    message: "确定删除所有未收藏的本地生成图片吗？收藏图片和生图历史会保留，此操作不可撤销。",
     confirmText: "清理",
   });
   if (!confirmed) return;
@@ -1521,7 +1686,7 @@ async function clearCache(button) {
   setBusy(button, false);
   if (result?.success !== false) {
     const deleted = result.cleanup?.deleted_count ?? result.deleted_count ?? 0;
-    showToast(`已清理 ${deleted} 张缓存图片。`);
+    showToast(`已清理 ${deleted} 张普通缓存，收藏已保留。${result.cleanup?.failed_count ? `另有 ${result.cleanup.failed_count} 张删除失败，请检查文件占用或权限。` : ""}`, result.cleanup?.failed_count ? "error" : "success");
     await loadCache();
     await loadHistory();
   }
@@ -1899,6 +2064,7 @@ function setSlideState(nextState, message = "") {
 async function updateSlide() {
   const item = state.slideItems[state.slideIndex];
   if (!item) return;
+  updateSlideFavorite();
   const expectedIndex = state.slideIndex;
   const image = byId("slide-img");
   image.onload = null;
@@ -1917,7 +2083,11 @@ async function updateSlide() {
   }
   // 拿到地址不代表能显示：data URL 之外的回退地址仍可能在弱网下失败。
   image.onload = () => {
-    if (expectedIndex === state.slideIndex) setSlideState("ready");
+    if (expectedIndex !== state.slideIndex) return;
+    if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+      byId("slide-info").innerHTML = slideInfoHtml(item, `${image.naturalWidth} x ${image.naturalHeight}`);
+    }
+    setSlideState("ready");
   };
   image.onerror = () => {
     if (expectedIndex !== state.slideIndex) return;
@@ -1934,7 +2104,7 @@ async function deleteCacheImage(cacheId) {
   if (!image) return;
   const confirmed = await askConfirm({
     title: "删除缓存图片",
-    message: "确定删除这张缓存图片吗？生图统计记录会保留，但这张本地图片会从图库和统计预览中移除。",
+    message: `${image.favorite ? "注意：这是一张收藏图片。" : ""}确定删除这张缓存图片吗？生图统计记录会保留，但这张本地图片会从图库和统计预览中移除，此操作不可撤销。`,
     confirmText: "删除",
   });
   if (!confirmed) return;
@@ -2049,6 +2219,8 @@ async function loadConfigBundle() {
   state.settings = config.settings && typeof config.settings === "object" ? deepClone(config.settings) : {};
   const pagePrefs = config.page_prefs || {};
   state.pagePrefs = {
+    mode_chart_height: pagePrefs.mode_chart_height ?? 240,
+    model_chart_height: pagePrefs.model_chart_height ?? 240,
     theme: THEME_VALUES.has(String(pagePrefs.theme || "").trim().toLowerCase())
       ? String(pagePrefs.theme).trim().toLowerCase()
       : DEFAULT_THEME,
@@ -2059,6 +2231,7 @@ async function loadConfigBundle() {
   state.cachePageSize = state.pagePrefs.cache_page_size;
   state.historyPageSize = state.pagePrefs.history_page_size;
   applyTheme(state.pagePrefs.theme);
+  applyChartHeights();
   const selfie = config.selfie || {};
   state.selfie = {
     ...state.selfie,
@@ -2079,6 +2252,28 @@ async function loadConfigBundle() {
 }
 
 function bindEvents() {
+  bindChartResize();
+  byId("filter-keyword")?.addEventListener("input", scheduleHistoryFilter);
+  byId("filter-keyword")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.isComposing) applyHistoryFilters();
+  });
+  byId("filter-favorites")?.addEventListener("change", applyHistoryFilters);
+  byId("cache-favorites")?.addEventListener("change", () => loadCache(1));
+  byId("history-select-all")?.addEventListener("change", (event) => {
+    state.selectedHistory = event.target.checked ? new Set(state.history.map((item) => item.id)) : new Set();
+    updateHistorySelection();
+  });
+  byId("history-body")?.addEventListener("change", (event) => {
+    const id = event.target.dataset.historyId;
+    if (!id) return;
+    event.target.checked ? state.selectedHistory.add(id) : state.selectedHistory.delete(id);
+    updateHistorySelection();
+  });
+  byId("delete-history")?.addEventListener("click", deleteSelectedHistory);
+  byId("slide-favorite")?.addEventListener("click", () => {
+    const image = state.slideItems[state.slideIndex];
+    if (image) void toggleImageFavorite(image.id);
+  });
   document.querySelectorAll(".nav-item").forEach((button) => {
     button.addEventListener("click", () => {
       switchTab(button.dataset.tab);
@@ -2095,7 +2290,6 @@ function bindEvents() {
     markDirty("templates");
   });
   byId("refresh-history")?.addEventListener("click", (event) => refreshStatisticsView(event.currentTarget));
-  byId("apply-filters")?.addEventListener("click", applyHistoryFilters);
   byId("cache-enabled")?.addEventListener("change", (event) => {
     state.cache.enabled = event.target.checked;
     markDirty("cache");
@@ -2184,6 +2378,10 @@ function bindEvents() {
     if (!actionButton) return;
     const action = actionButton.dataset.action;
     const index = Number(actionButton.dataset.index);
+    if (action === "image-favorite") {
+      await toggleImageFavorite(actionButton.dataset.cacheId);
+      return;
+    }
 
     if (action === "pipeline-toggle") {
       state.expandedPipeline.has(index) ? state.expandedPipeline.delete(index) : state.expandedPipeline.add(index);

@@ -2,10 +2,12 @@ import asyncio
 import json
 import random
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional, Union
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from astrbot import logger
 from astrbot.core import AstrBotConfig
@@ -42,6 +44,44 @@ def node_display_name(node: dict) -> str:
     if model:
         return model
     return template_display_name(node.get("__template_key", "")) or "未命名模型"
+
+
+@dataclass
+class PipelineAttemptProgress:
+    """仅统计日志；每次管线执行独占，内部重试不重复计入主尝试。"""
+
+    budget: int
+    current: int = 0
+    node_attempt: int | None = None
+    node_requests: int = 0
+
+    def start_node(self) -> None:
+        self.node_attempt = None
+        self.node_requests = 0
+
+    def record(self, attempt_no: int) -> tuple[int, bool]:
+        first_request = self.node_requests == 0
+        if self.node_attempt != attempt_no:
+            self.current += 1
+            self.node_attempt = attempt_no
+        self.node_requests += 1
+        return self.current, first_request
+
+
+@dataclass(frozen=True)
+class ReferenceLogContext:
+    """参考图元数据不可变；尝试进度由管线为每个生成任务单独创建。"""
+
+    original_count: int = 0
+    mode: str = ""
+    persona_count: int | None = None
+    count: int = 1
+    task_index: int = 1
+    request_id: str = field(default_factory=lambda: uuid4().hex[:10])
+    attempt_progress: PipelineAttemptProgress | None = field(default=None, repr=False, compare=False)
+
+    def for_task(self, index: int) -> "ReferenceLogContext":
+        return replace(self, task_index=index, attempt_progress=None)
 
 
 class BaseProvider(ABC):
@@ -179,9 +219,57 @@ class BaseProvider(ABC):
         )
         await asyncio.sleep(delay)
 
+    def _log_image_request(
+        self,
+        request_log: ReferenceLogContext,
+        *,
+        received_count: int,
+        sent_count: int,
+        attempt_no: int,
+        internal_attempt: int | None = None,
+        internal_budget: int | None = None,
+        first_request: bool | None = None,
+    ) -> None:
+        """在实际生图 POST 前调用；计数指请求内的图片，不表示服务器已接收。"""
+        mode = {"text2image": "文生图", "image2image": "图生图", "selfie": "自拍"}.get(
+            request_log.mode, "图生图" if received_count else "文生图"
+        )
+        if request_log.attempt_progress is not None:
+            current_attempt, first_node_request = request_log.attempt_progress.record(attempt_no)
+            attempt_budget = request_log.attempt_progress.budget
+        else:
+            # 兼容直接调用 Provider.generate 的场景，使用该节点自己的主尝试次数。
+            current_attempt, attempt_budget = attempt_no, self.max_retry
+            first_node_request = attempt_no == 1 and internal_attempt in (None, 1)
+        if first_request is not None:
+            first_node_request = first_request
+        fields = [f"{request_log.request_id} 尝试={current_attempt}/{attempt_budget}"]
+        if request_log.count > 1:
+            fields.append(f"批量生图{request_log.task_index}/{request_log.count}")
+        model_label = self.label.replace("\r", " ").replace("\n", " ")
+        fields.extend([f"模式={mode}", f"模型={model_label}"])
+        prefix = " | ".join(fields)
+        if first_node_request:
+            limits = []
+            if request_log.original_count > received_count:
+                limits.append(f"插件参考图限制：{request_log.original_count}张→{received_count}张")
+            if received_count > sent_count:
+                limits.append(f"提供商参考图限制：{received_count}张→{sent_count}张")
+            if limits:
+                logger.info(f"[参考图限制] {prefix} | {'；'.join(limits)}")
+        image_info = f"参考图={sent_count}张"
+        if request_log.persona_count is not None:
+            # 现有组合和提供商截取均保留前缀，人设图排在额外图之前。
+            persona_sent = min(request_log.persona_count, sent_count)
+            image_info += f"（人设{persona_sent}张，额外{sent_count - persona_sent}张）"
+        if internal_attempt is not None:
+            image_info += f" | 内部尝试={internal_attempt}/{internal_budget}"
+        logger.info(f"[生图请求] {prefix} | {image_info}")
+
     @abstractmethod
     async def generate(
-        self, image_bytes_list: List[bytes], prompt: str
+        self, image_bytes_list: List[bytes], prompt: str,
+        *, request_log: ReferenceLogContext | None = None,
     ) -> Union[bytes, list[bytes], str, dict[str, str]]:
         """
         执行生图调用。

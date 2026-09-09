@@ -16,6 +16,10 @@ try:
 except Exception:  # pragma: no cover - 兼容旧版 AstrBot
     extract_quoted_message_images = None
 
+class ImageInputError(ValueError):
+    """用户明确提供的参考图片未能完整读取。"""
+
+
 class ImageWorkflow:
     def __init__(self, config: AstrBotConfig, proxy_url: str | None = None):
         if proxy_url: logger.info(f"ImageWorkflow 使用代理: {proxy_url}")
@@ -107,19 +111,26 @@ class ImageWorkflow:
             logger.debug(f"图片组件转本地路径失败，回退原始引用: {e}")
         return str(component.url or component.file or component.path or "").strip()
 
-    async def _load_image_components(self, components: Iterable[Image]) -> list[bytes]:
+    async def _load_image_components(self, components: Iterable[Image], *, strict: bool = False) -> list[bytes]:
         refs = []
         for component in components:
             ref = await self._image_component_ref(component)
             if ref:
                 refs.append(ref)
-        return await self._load_image_refs(refs)
+            elif strict:
+                raise ImageInputError("参考图片读取失败，请重新发送图片后重试。")
+        return await self._load_image_refs(refs, strict=strict)
 
-    async def _load_image_refs(self, refs: Iterable[str]) -> list[bytes]:
+    async def _load_image_refs(self, refs: Iterable[str], *, strict: bool = False) -> list[bytes]:
         images: list[bytes] = []
-        for ref in self._dedupe_refs(refs):
+        unique_refs = self._dedupe_refs(refs)
+        for ref in unique_refs:
             if img := await self._load_bytes(ref):
                 images.append(img)
+        if strict and len(images) != len(unique_refs):
+            raise ImageInputError(
+                f"参考图片未能完整读取（成功 {len(images)}/{len(unique_refs)} 张），请重新发送后重试。"
+            )
         return images
 
     def _provider_request_image_refs(self, event: AstrMessageEvent) -> list[str]:
@@ -158,7 +169,7 @@ class ImageWorkflow:
     ) -> List[bytes]:
         """统一读取事件上下文中的参考图。
 
-        读取优先级保持插件既有设计：引用图 > LLM/框架兜底引用图 > 当前消息图片 > @ 头像 > 发送者头像兜底。
+        读取优先级：引用图 > 当前消息原图 > 框架图片兜底 > @ 头像 > 发送者头像兜底。
         send_selfie 与 image_generation 通过参数裁剪同一套策略，避免 AstrBot 框架升级后两边行为漂移。
         """
         bot_id = str(event.get_self_id() or "").strip()
@@ -180,28 +191,34 @@ class ImageWorkflow:
                 at_user_ids.append(uid)
 
         # 1. 引用消息链中的图片最可信，先读。
-        quoted_images = await self._load_image_components(reply_images)
+        quoted_images = await self._load_image_components(reply_images, strict=True)
         if quoted_images:
             return quoted_images
 
-        # 2. LLM 工具 / AstrBot v4.26+ 可能把引用图放在 provider_request 或异步 extractor 中。
+        # 只有真实 Reply 才解析引用图；provider_request 混有当前附图，不能当作引用图。
         if include_llm_fallbacks:
-            fallback_images = await self._load_image_refs(self._provider_request_image_refs(event))
-            if not fallback_images:
-                fallback_images = await self._load_image_refs(await self._quoted_extractor_image_refs(event))
-            if fallback_images:
-                return fallback_images
+            quoted_refs = await self._quoted_extractor_image_refs(event)
+            if quoted_refs:
+                return await self._load_image_refs(quoted_refs, strict=True)
 
         # 3. 当前消息直接携带的图片。
         direct_loaded: list[bytes] = []
         if include_direct_images:
-            direct_loaded = await self._load_image_components(direct_images)
+            direct_loaded = await self._load_image_components(direct_images, strict=True)
             if direct_loaded:
-                if append_at_after_explicit and include_at_avatars:
+                # LLM 的显式图片路径原本不追加 @头像；保留这一行为。
+                if (append_at_after_explicit and include_at_avatars
+                        and not self._provider_request_image_refs(event)):
                     for uid in at_user_ids:
                         if avatar := await self._get_avatar(uid):
                             direct_loaded.append(avatar)
                 return direct_loaded
+
+        # 没有可用的原消息图片来源时，才读取框架列表，且不允许静默缺图。
+        if include_llm_fallbacks:
+            fallback_refs = self._provider_request_image_refs(event)
+            if fallback_refs:
+                return await self._load_image_refs(fallback_refs, strict=True)
 
         # 4. @ 用户头像。
         if include_at_avatars and at_user_ids:

@@ -599,17 +599,17 @@
                 "hint": "开启后，收到请求时不回复文字而是贴“OK”表情（仅适用于QQ群），生成成功后仅发送图片不带文字说明。生成失败仍会提示。私聊始终不使用简洁模式。",
                 "default": false
             },
-            "generation_start_message": {
-                "description": "生图开始提示文案",
-                "type": "text",
-                "hint": "留空使用默认文案。支持 {type}（文生图/图生图/自拍/文生视频/图生视频）和 {prompt}（前20字摘要；自拍为动作，未填时用人设名），也可只填文字。未知占位符原样保留。简洁模式及 send_selfie 不额外发送开始文字。",
-                "default": ""
-            },
             "ignore_bot_at_avatar": {
                 "description": "忽略 @机器人自身的头像",
                 "type": "bool",
                 "hint": "默认关闭。开启后，普通图生图/模板按当前机器人ID忽略其 @头像；若已过滤且仍无参考图，不改用发送者头像。其他用户、引用图优先级和 LLM 模式判断不变；自拍始终忽略机器人自身。",
                 "default": false
+            },
+            "generation_start_message": {
+                "description": "生图开始提示文案",
+                "type": "text",
+                "hint": "留空使用默认文案。支持 {type}（文生图/图生图/自拍/文生视频/图生视频）和 {prompt}（前20字摘要；自拍为动作，未填时用人设名），也可只填文字。未知占位符原样保留。简洁模式及 send_selfie 不额外发送开始文字。",
+                "default": ""
             },
             "quote_reply_mode": {
                 "description": "成功生成是否引用回复图片",
@@ -657,19 +657,19 @@
                 "description": "最大缓存大小（MB）",
                 "type": "string",
                 "default": "",
-                "hint": "留空或填写 0 表示不限制。达到上限时会自动删除最旧的缓存图片。"
+                "hint": "留空或填写 0 表示不限制。超过上限时会自动删除最旧的未收藏缓存图片；收藏图片不计入该限制。"
             },
             "image_cache_max_age_hours": {
                 "description": "最长保存时间（小时）",
                 "type": "string",
                 "default": "",
-                "hint": "留空或填写 0 表示不限制。超过该时间的缓存图片会被自动清理。"
+                "hint": "留空或填写 0 表示不限制。超过该时间的未收藏缓存图片会被自动清理；收藏图片不受该限制。"
             },
             "image_cache_max_count": {
                 "description": "最多保存图片张数",
                 "type": "string",
                 "default": "",
-                "hint": "留空或填写 0 表示不限制。达到上限时会自动删除最旧的缓存图片。"
+                "hint": "留空或填写 0 表示不限制。超过上限时会自动删除最旧的未收藏缓存图片；收藏图片不计入该限制。"
             }
         }
     },
