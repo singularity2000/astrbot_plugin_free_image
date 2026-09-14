@@ -46,7 +46,7 @@ SETTINGS_GROUPS = ("general", "access_control", "quota", "checkin", "llm_tools")
     PLUGIN_NAME,
     "Singularity2000",
     "文生图、图生图，可自定义模型能力与提示词模板，兼容多种端点",
-    "3.7.5",
+    "3.8.0",
     "https://github.com/singularity2000/astrbot_plugin_free_image",
 )
 class ImageGenerationPlugin(Star):
@@ -62,6 +62,8 @@ class ImageGenerationPlugin(Star):
         self.usage_guard: Optional[UsageGuard] = None
         self.commands = CommandHandlers(self)
         self.prompt_map: Dict[str, str] = {}
+        self._generation_unit_tasks: set[asyncio.Task] = set()
+        self._generation_controller_tasks: set[asyncio.Task] = set()
         self._register_page_apis()
 
     async def initialize(self):
@@ -127,6 +129,44 @@ class ImageGenerationPlugin(Star):
             self.pipeline.build(self.conf.get("api_pipeline", []))
             self.usage_guard = UsageGuard(self.conf, self.persistence, self.pipeline)
         self._refresh_llm_tool_descriptions()
+
+    @staticmethod
+    def _normalized_batch_count(count: int) -> int:
+        try:
+            return max(1, min(3, int(count)))
+        except (TypeError, ValueError):
+            return 1
+
+    def _track_generation_task(
+        self, *, controller: bool = False, task: asyncio.Task | None = None
+    ) -> None:
+        task = task or asyncio.current_task()
+        if task is None:
+            return
+        tasks = (
+            self._generation_controller_tasks
+            if controller
+            else self._generation_unit_tasks
+        )
+        tasks.add(task)
+        task.add_done_callback(self._discard_generation_task)
+
+    def _discard_generation_task(self, task: asyncio.Task) -> None:
+        self._generation_unit_tasks.discard(task)
+        self._generation_controller_tasks.discard(task)
+
+    def stop_generation_tasks(self) -> int:
+        unit_tasks = [
+            task for task in self._generation_unit_tasks if not task.done()
+        ]
+        controller_tasks = [
+            task for task in self._generation_controller_tasks if not task.done()
+        ]
+        for task in controller_tasks:
+            task.cancel()
+        for task in unit_tasks:
+            task.cancel()
+        return len(unit_tasks)
 
     async def save_config_and_refresh_runtime(self) -> None:
         self.conf.save_config()
@@ -1089,6 +1129,8 @@ class ImageGenerationPlugin(Star):
         sender_id = event.get_sender_id()
         group_id = event.get_group_id()
         is_master = self.is_global_admin(event)
+        batch_count = self._normalized_batch_count(count)
+        self._track_generation_task(controller=is_master and batch_count > 1)
 
         # --- 权限和次数检查 ---
         if not usage_checked:
@@ -1158,10 +1200,7 @@ class ImageGenerationPlugin(Star):
 
         # --- 批量前余额检查 ---
         # count > 1 时，提前查余额，避免白嫖 API
-        try:
-            count = max(1, min(3, int(count)))
-        except (TypeError, ValueError):
-            count = 1
+        count = batch_count
         available = count
         if count > 1 and not is_master:
             # 估算可用次数：用户余额 + 群余额（若启用群限制）
@@ -1262,6 +1301,7 @@ class ImageGenerationPlugin(Star):
         group_id = event.get_group_id()
 
         async def _single(i: int):
+            self._track_generation_task()
             suffix = f" ({i+1}/{count})" if count > 1 else ""
             if i >= available:
                 quota_msg = self._build_quota_msg(group_id)
@@ -1469,6 +1509,21 @@ class ImageGenerationPlugin(Star):
         async for result in self.commands.on_model_pipeline_command(event):
             yield result
 
+    @filter.command("停止画图", prefix_optional=True, desc="管理员强行停止当前所有画图任务。示例：停止画图。")
+    async def on_stop_image_generation(self, event: AstrMessageEvent):
+        if not self.is_global_admin(event):
+            yield event.plain_result("你没有权限使用此命令。")
+            event.stop_event()
+            return
+        stopped_count = self.stop_generation_tasks()
+        message = (
+            f"已停止{stopped_count}个画图任务"
+            if stopped_count
+            else "当前无画图任务"
+        )
+        yield event.plain_result(message)
+        event.stop_event()
+
     @filter.command("画图缓存", prefix_optional=True, desc="查看、开启、关闭或清理图片缓存。示例：画图缓存 状态、画图缓存 清理。")
     async def on_image_cache_command(self, event: AstrMessageEvent):
         async for res in self.commands.on_image_cache_command(event):
@@ -1535,6 +1590,8 @@ class ImageGenerationPlugin(Star):
             return "自拍失败，原因：插件尚未完成初始化。"
 
         is_master = self.is_global_admin(event)
+        batch_count = self._normalized_batch_count(count)
+        self._track_generation_task(controller=is_master and batch_count > 1)
         quota_err = None if usage_checked else await self.usage_guard.check_can_use(event, is_master)
         if quota_err is not None:
             if quota_err and not is_llm_tool:
@@ -1580,11 +1637,7 @@ class ImageGenerationPlugin(Star):
                 ),
             )
 
-        # clamp count
-        try:
-            count = max(1, min(3, int(count)))
-        except (TypeError, ValueError):
-            count = 1
+        count = batch_count
 
         # 批量前余额检查
         sender_id = event.get_sender_id()
@@ -1760,6 +1813,7 @@ class ImageGenerationPlugin(Star):
         request_log: ReferenceLogContext | None = None,
     ):
         """单次自拍生图任务，供并发使用。返回 (kind, suffix, payload)。"""
+        self._track_generation_task()
         suffix = f" ({i+1}/{count})" if count > 1 else ""
         if i >= available:
             group_id = event.get_group_id()

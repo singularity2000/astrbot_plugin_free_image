@@ -111,7 +111,9 @@ class ImageWorkflow:
             logger.debug(f"图片组件转本地路径失败，回退原始引用: {e}")
         return str(component.url or component.file or component.path or "").strip()
 
-    async def _load_image_components(self, components: Iterable[Image], *, strict: bool = False) -> list[bytes]:
+    async def _image_component_refs(
+        self, components: Iterable[Image], *, strict: bool = False
+    ) -> list[str]:
         refs = []
         for component in components:
             ref = await self._image_component_ref(component)
@@ -119,6 +121,12 @@ class ImageWorkflow:
                 refs.append(ref)
             elif strict:
                 raise ImageInputError("参考图片读取失败，请重新发送图片后重试。")
+        return refs
+
+    async def _load_image_components(
+        self, components: Iterable[Image], *, strict: bool = False
+    ) -> list[bytes]:
+        refs = await self._image_component_refs(components, strict=strict)
         return await self._load_image_refs(refs, strict=strict)
 
     async def _load_image_refs(self, refs: Iterable[str], *, strict: bool = False) -> list[bytes]:
@@ -190,29 +198,29 @@ class ImageWorkflow:
                     continue
                 at_user_ids.append(uid)
 
-        # 1. 引用消息链中的图片最可信，先读。
-        quoted_images = await self._load_image_components(reply_images, strict=True)
-        if quoted_images:
-            return quoted_images
+        # 引用图排在当前附图前；两者都是用户显式提供的参考图，需合并读取。
+        quoted_refs = await self._image_component_refs(reply_images, strict=True)
+        if include_llm_fallbacks and not quoted_refs:
+            quoted_refs.extend(await self._quoted_extractor_image_refs(event))
+        has_quoted_images = bool(quoted_refs)
 
-        # 只有真实 Reply 才解析引用图；provider_request 混有当前附图，不能当作引用图。
-        if include_llm_fallbacks:
-            quoted_refs = await self._quoted_extractor_image_refs(event)
-            if quoted_refs:
-                return await self._load_image_refs(quoted_refs, strict=True)
-
-        # 3. 当前消息直接携带的图片。
-        direct_loaded: list[bytes] = []
+        direct_refs = (
+            await self._image_component_refs(direct_images, strict=True)
+            if include_direct_images
+            else []
+        )
+        explicit_images = await self._load_image_refs(
+            quoted_refs + direct_refs, strict=True
+        )
         if include_direct_images:
-            direct_loaded = await self._load_image_components(direct_images, strict=True)
-            if direct_loaded:
+            if explicit_images:
                 # LLM 的显式图片路径原本不追加 @头像；保留这一行为。
-                if (append_at_after_explicit and include_at_avatars
+                if (append_at_after_explicit and include_at_avatars and not has_quoted_images
                         and not self._provider_request_image_refs(event)):
                     for uid in at_user_ids:
                         if avatar := await self._get_avatar(uid):
-                            direct_loaded.append(avatar)
-                return direct_loaded
+                            explicit_images.append(avatar)
+                return explicit_images
 
         # 没有可用的原消息图片来源时，才读取框架列表，且不允许静默缺图。
         if include_llm_fallbacks:
@@ -268,6 +276,18 @@ class ImageWorkflow:
             include_direct_images=True,
             include_at_avatars=True,
             append_at_after_explicit=True,
+            sender_avatar_fallback=False,
+            ignore_bot_at=True,
+        )
+
+    async def get_explicit_images(self, event: AstrMessageEvent) -> List[bytes]:
+        """仅读取用户显式发送或引用的图片，不读取头像等兜底图。"""
+        return await self._collect_context_images(
+            event,
+            include_llm_fallbacks=True,
+            include_direct_images=True,
+            include_at_avatars=False,
+            append_at_after_explicit=False,
             sender_avatar_fallback=False,
             ignore_bot_at=True,
         )

@@ -59,13 +59,14 @@ class PipelineAttemptProgress:
         self.node_attempt = None
         self.node_requests = 0
 
-    def record(self, attempt_no: int) -> tuple[int, bool]:
+    def record(self, attempt_no: int) -> tuple[int, bool, bool]:
         first_request = self.node_requests == 0
-        if self.node_attempt != attempt_no:
+        attempt_changed = self.node_attempt != attempt_no
+        if attempt_changed:
             self.current += 1
             self.node_attempt = attempt_no
         self.node_requests += 1
-        return self.current, first_request
+        return self.current, first_request, attempt_changed
 
 
 @dataclass(frozen=True)
@@ -235,14 +236,22 @@ class BaseProvider(ABC):
             request_log.mode, "图生图" if received_count else "文生图"
         )
         if request_log.attempt_progress is not None:
-            current_attempt, first_node_request = request_log.attempt_progress.record(attempt_no)
+            current_attempt, first_node_request, attempt_changed = (
+                request_log.attempt_progress.record(attempt_no)
+            )
             attempt_budget = request_log.attempt_progress.budget
         else:
             # 兼容直接调用 Provider.generate 的场景，使用该节点自己的主尝试次数。
             current_attempt, attempt_budget = attempt_no, self.max_retry
             first_node_request = attempt_no == 1 and internal_attempt in (None, 1)
+            attempt_changed = True
         if first_request is not None:
             first_node_request = first_request
+        log_image_request = (
+            logger.debug
+            if internal_attempt is not None and not attempt_changed
+            else logger.info
+        )
         fields = [f"{request_log.request_id} 尝试={current_attempt}/{attempt_budget}"]
         if request_log.count > 1:
             fields.append(f"批量生图{request_log.task_index}/{request_log.count}")
@@ -256,7 +265,7 @@ class BaseProvider(ABC):
             if received_count > sent_count:
                 limits.append(f"提供商参考图限制：{received_count}张→{sent_count}张")
             if limits:
-                logger.info(f"[参考图限制] {prefix} | {'；'.join(limits)}")
+                log_image_request(f"[参考图限制] {prefix} | {'；'.join(limits)}")
         image_info = f"参考图={sent_count}张"
         if request_log.persona_count is not None:
             # 现有组合和提供商截取均保留前缀，人设图排在额外图之前。
@@ -264,7 +273,7 @@ class BaseProvider(ABC):
             image_info += f"（人设{persona_sent}张，额外{sent_count - persona_sent}张）"
         if internal_attempt is not None:
             image_info += f" | 内部尝试={internal_attempt}/{internal_budget}"
-        logger.info(f"[生图请求] {prefix} | {image_info}")
+        log_image_request(f"[生图请求] {prefix} | {image_info}")
 
     @abstractmethod
     async def generate(

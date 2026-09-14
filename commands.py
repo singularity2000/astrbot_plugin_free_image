@@ -4,12 +4,13 @@ import re
 from datetime import datetime
 
 from astrbot import logger
-from astrbot.core.message.components import At, Image, Reply
+from astrbot.core.message.components import At
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 from .history_cache import format_size
 from .providers.base import node_display_name
 from .selfie import find_persona, find_style, resolve_persona
+from .workflow import ImageInputError
 
 
 class CommandHandlers:
@@ -687,20 +688,10 @@ class CommandHandlers:
             return f"自拍人设 ID 已存在：{pid}。"
         imgs: list[bytes] = []
         if p.iwf:
-            for seg in event.message_obj.message:
-                if isinstance(seg, Reply) and seg.chain:
-                    for reply_seg in seg.chain:
-                        if isinstance(reply_seg, Image):
-                            if reply_seg.url and (img := await p.iwf._load_bytes(reply_seg.url)):
-                                imgs.append(img)
-                            elif reply_seg.file and (img := await p.iwf._load_bytes(reply_seg.file)):
-                                imgs.append(img)
-            for seg in event.message_obj.message:
-                if isinstance(seg, Image):
-                    if seg.url and (img := await p.iwf._load_bytes(seg.url)):
-                        imgs.append(img)
-                    elif seg.file and (img := await p.iwf._load_bytes(seg.file)):
-                        imgs.append(img)
+            try:
+                imgs = await p.iwf.get_explicit_images(event)
+            except ImageInputError as exc:
+                return str(exc)
         if not imgs:
             return "请随消息发送或引用至少一张图片作为参考图。"
 
