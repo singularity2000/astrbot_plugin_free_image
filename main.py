@@ -46,7 +46,7 @@ SETTINGS_GROUPS = ("general", "access_control", "quota", "checkin", "llm_tools")
     PLUGIN_NAME,
     "Singularity2000",
     "文生图、图生图，可自定义模型能力与提示词模板，兼容多种端点",
-    "3.8.0",
+    "3.8.1",
     "https://github.com/singularity2000/astrbot_plugin_free_image",
 )
 class ImageGenerationPlugin(Star):

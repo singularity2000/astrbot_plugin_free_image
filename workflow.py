@@ -16,6 +16,9 @@ try:
 except Exception:  # pragma: no cover - 兼容旧版 AstrBot
     extract_quoted_message_images = None
 
+_DEFAULT_DOWNLOAD_PROXY = object()
+
+
 class ImageInputError(ValueError):
     """用户明确提供的参考图片未能完整读取。"""
 
@@ -27,10 +30,14 @@ class ImageWorkflow:
         self.session = aiohttp.ClientSession()
         self.proxy = proxy_url
 
-    async def _download_image(self, url: str) -> bytes | None:
+    async def _download_image(
+        self, url: str, *, proxy: str | None | object = _DEFAULT_DOWNLOAD_PROXY,
+    ) -> bytes | None:
+        # 未传参数时保留共享代理；显式 None 表示当前节点要求直连。
+        download_proxy = self.proxy if proxy is _DEFAULT_DOWNLOAD_PROXY else proxy
         download_timeout = self.conf.get("general", {}).get("download_timeout", 30)
         try:
-            async with self.session.get(url, proxy=self.proxy, timeout=download_timeout) as resp:
+            async with self.session.get(url, proxy=download_proxy, timeout=download_timeout) as resp:
                 resp.raise_for_status()
                 return await resp.read()
         except Exception as e:

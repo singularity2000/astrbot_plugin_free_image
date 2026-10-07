@@ -581,6 +581,10 @@ function createPipelineNode(templateKey) {
 function fieldControlHtml(section, index, key, field, value) {
   const type = field?.type || "string";
   const baseAttrs = `data-bind="${section}" data-index="${index}" data-key="${escapeHtml(key)}" data-type="${escapeHtml(type)}"`;
+  if (section === "pipeline" && key === "size" && state.pipeline[index]?.__template_key === "openai_images" && state.pipeline[index]?.size_mode === "自定义") {
+    const [width = "", height = ""] = String(value || "").toLowerCase().split("x");
+    return `<span class="inline-check"><input type="number" min="1" step="1" aria-label="宽度（像素）" placeholder="宽度 px" data-images-size-index="${index}" data-images-width value="${escapeHtml(width)}" /> × <input type="number" min="1" step="1" aria-label="高度（像素）" placeholder="高度 px" data-images-size-index="${index}" data-images-height value="${escapeHtml(height)}" /></span>`;
+  }
   if (key === "capabilities") {
     const selected = new Set(Array.isArray(value) ? value : ["text2image", "image2image"]);
     return `<div class="capability-checklist" data-bind="${section}" data-index="${index}" data-key="capabilities" data-type="capabilities">${Object.entries(CAPABILITY_LABELS).map(([cap, label]) => `<label class="inline-check"><input type="checkbox" data-capability-value="${cap}" ${selected.has(cap) ? "checked" : ""} /><span>${label}</span></label>`).join("")}</div>`;
@@ -589,7 +593,7 @@ function fieldControlHtml(section, index, key, field, value) {
     const options = [...field.options];
     if (value && !options.includes(value)) options.unshift(value);
     return `<select ${baseAttrs}>${options.map((option) => (
-      `<option value="${escapeHtml(option)}" ${String(option) === String(value) ? "selected" : ""}>${escapeHtml(option)}</option>`
+      `<option value="${escapeHtml(option)}" ${String(option) === String(value) ? "selected" : ""} ${section === "pipeline" && key === "size_ratio" && state.pipeline[index]?.__template_key === "openai_images" && state.pipeline[index]?.size_resolution === "4K" && !["16:9", "9:16"].includes(option) ? "disabled" : ""}>${escapeHtml(option)}</option>`
     )).join("")}</select>`;
   }
   if (type === "bool") {
@@ -609,6 +613,29 @@ function fieldControlHtml(section, index, key, field, value) {
     return `<input ${baseAttrs} type="number" step="${step}" value="${escapeHtml(value ?? "")}" />`;
   }
   return `<input ${baseAttrs} type="text" value="${escapeHtml(value ?? "")}" />`;
+}
+
+function imagesPresetSize(node) {
+  const sizes = {
+    "1K": { "1:1": "1024x1024", "16:9": "1536x864", "4:3": "1152x864", "3:2": "1248x832" },
+    "2K": { "1:1": "2048x2048", "16:9": "2048x1152", "4:3": "2048x1536", "3:2": "2016x1344" },
+    "4K": { "16:9": "3840x2160" },
+  };
+  const ratio = node.size_ratio || "1:1";
+  const reverse = ["9:16", "3:4", "2:3"].includes(ratio);
+  const key = reverse ? ratio.split(":").reverse().join(":") : ratio;
+  const size = sizes[node.size_resolution || "1K"]?.[key];
+  return size && reverse ? size.split("x").reverse().join("x") : size;
+}
+
+function imagesSizePreview(node) {
+  const mode = node.size_mode || "兼容旧配置";
+  if (mode === "模型自动") return "实际发送 size：auto";
+  if (mode === "预设尺寸") return imagesPresetSize(node)
+    ? `实际发送 size：${imagesPresetSize(node)}（请确认模型支持）`
+    : "此组合不支持：4K 预设仅支持 16:9、9:16。请修改比例或使用自定义，不会自动缩小。";
+  return node.size ? `实际发送 size：${node.size}` : mode === "自定义"
+    ? "请输入宽x高，例如 2048x1152" : "沿用旧配置：按提示词或参考图推断尺寸";
 }
 
 function fieldHtml(section, index, key, field, value) {
@@ -668,6 +695,13 @@ function updateBoundValue(input) {
   if (section === "pipeline" && state.pipeline[index]) {
     state.pipeline[index][key] = value;
     markDirty("pipeline");
+    if (state.pipeline[index].__template_key === "openai_images") {
+      if (["size_mode", "size_resolution", "size_ratio"].includes(key)) renderPipeline();
+      else if (key === "size") {
+        const preview = input.closest(".node-card")?.querySelector("[data-images-size-preview]");
+        if (preview) preview.textContent = imagesSizePreview(state.pipeline[index]);
+      }
+    }
     if (["enabled", "model", "max_retry", "api_url", "vertex_ai_base_api", "recaptcha_base_api"].includes(key)) {
       refreshPipelineNodeSummary(index);
     }
@@ -792,7 +826,7 @@ function pipelineSummaryText(node) {
   const capabilityText = capabilities.map((item) => CAPABILITY_LABELS[item] || item).join(" · ");
   const apiUrl = String(node.api_url || node.vertex_ai_base_api || node.recaptcha_base_api || "").trim();
   const timeout = node.api_timeout ?? getTemplateMeta(node.__template_key || "").items?.api_timeout?.default ?? 300;
-  return [model, `重试 ${node.max_retry ?? 3} 次`, `${timeout} 秒后超时`, capabilityText, apiUrl || "未配置地址"].join("  ·  ");
+  return [model, `最大尝试 ${node.max_retry ?? 3} 次`, `${timeout} 秒后超时`, capabilityText, apiUrl || "未配置地址"].join("  ·  ");
 }
 
 function refreshPipelineNodeSummary(index) {
@@ -828,7 +862,12 @@ function renderPipeline() {
       Object.entries({ ...knownFields, ...compatFields })
         .filter(([fieldKey]) => fieldKey !== "enabled"),
     );
+    const imagesNode = key === "openai_images";
+    const sizeMode = node.size_mode || "兼容旧配置";
     const fields = Object.entries(mergedFields)
+      .filter(([fieldKey]) => !imagesNode || (
+        (!["size_resolution", "size_ratio"].includes(fieldKey) || sizeMode === "预设尺寸") &&
+        (fieldKey !== "size" || ["兼容旧配置", "自定义"].includes(sizeMode))))
       .map(([fieldKey, field]) => fieldHtml("pipeline", index, fieldKey, field, node[fieldKey] ?? defaultValueForField(field)))
       .join("");
     return `
@@ -854,6 +893,7 @@ function renderPipeline() {
         <div class="node-body">
           <div class="provider-note">${escapeHtml(meta.hint || "")}</div>
           <div class="form-grid">${fields}</div>
+          ${imagesNode ? `<div class="provider-note" data-images-size-preview>${escapeHtml(imagesSizePreview(node))}</div>` : ""}
           <div class="danger-zone">
             <button class="btn danger" data-action="pipeline-delete" data-index="${index}" type="button">删除此节点</button>
           </div>
@@ -2506,6 +2546,16 @@ function bindEvents() {
   });
 
   document.body.addEventListener("input", (event) => {
+    if (event.target.dataset.imagesSizeIndex !== undefined) {
+      const index = Number(event.target.dataset.imagesSizeIndex);
+      const card = event.target.closest(".node-card");
+      const width = card.querySelector("[data-images-width]").value;
+      const height = card.querySelector("[data-images-height]").value;
+      state.pipeline[index].size = `${width}x${height}`;
+      markDirty("pipeline");
+      card.querySelector("[data-images-size-preview]").textContent = imagesSizePreview(state.pipeline[index]);
+      return;
+    }
     const bound = event.target.closest("[data-bind]");
     if (bound) updateBoundValue(bound);
     const template = event.target.closest("[data-template-field]");

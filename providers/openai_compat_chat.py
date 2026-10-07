@@ -362,7 +362,7 @@ class OpenAICompatChatProvider(BaseProvider):
                             if result.startswith("http://") or result.startswith(
                                 "https://"
                             ):
-                                downloaded = await self.iwf._download_image(result)
+                                downloaded = await self.iwf._download_image(result, proxy=self.proxy)
                                 if downloaded:
                                     return downloaded
                                 last_err = f"下载返回资源失败: {result}"

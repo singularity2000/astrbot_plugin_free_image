@@ -74,7 +74,7 @@ class GenericImageProvider(BaseProvider):
                                         base64.b64decode(url.split(",", 1)[1])
                                     )
                                     continue
-                                downloaded = await self.iwf._download_image(url)
+                                downloaded = await self.iwf._download_image(url, proxy=self.proxy)
                                 if downloaded:
                                     image_results.append(downloaded)
 

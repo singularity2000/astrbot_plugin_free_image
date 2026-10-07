@@ -108,10 +108,10 @@
                         "hint": "留空则不使用代理。格式为 http://user:pass@host:port，例如 http://127.0.0.1:7890"
                     },
                     "max_retry": {
-                        "description": "最大重试次数",
+                        "description": "最大尝试次数",
                         "type": "int",
                         "default": 10,
-                        "hint": "本节点内请求失败时的最大重试次数（逆向接口建议较高值）"
+                        "hint": "本节点最多尝试次数，包含首次请求；原有尝试行为不变。"
                     },
                     "retry_mode": {
                         "description": "重试间隔模式",
@@ -215,10 +215,10 @@
                         "hint": "留空则不使用代理。格式为 http://user:pass@host:port，例如 http://127.0.0.1:7890"
                     },
                     "max_retry": {
-                        "description": "最大重试次数",
+                        "description": "最大尝试次数",
                         "type": "int",
                         "default": 3,
-                        "hint": "本节点内请求失败时的最大重试次数"
+                        "hint": "本节点最多尝试次数，包含首次请求；原有尝试行为不变。"
                     },
                     "api_timeout": {
                         "description": "API请求超时(秒)",
@@ -229,7 +229,7 @@
                 }
             },
             "openai_images": {
-                "name": "OpenAI Images 官方",
+                "name": "OpenAI Images 兼容",
                 "hint": "OpenAI 官方 Images API。无输入图走 /images/generations，有输入图走 /images/edits。",
                 "items": {
                     "enabled": {
@@ -279,13 +279,13 @@
                         "description": "网络代理",
                         "type": "string",
                         "default": "",
-                        "hint": "留空则不使用代理。格式为 http://user:pass@host:port，例如 http://127.0.0.1:7890"
+                        "hint": "生图请求及结果图片下载均使用本节点代理；留空直连。"
                     },
                     "max_retry": {
-                        "description": "最大重试次数",
+                        "description": "最大尝试次数",
                         "type": "int",
                         "default": 3,
-                        "hint": "本节点内请求失败时的最大重试次数"
+                        "hint": "最多尝试次数，包含首次。每张结果图片下载独立使用同样的次数；下载耗尽后结束本节点尝试，不在本节点重新生图；自动管线继续下一节点。"
                     },
                     "api_timeout": {
                         "description": "API请求超时(秒)",
@@ -299,11 +299,104 @@
                         "default": 1,
                         "hint": "一次请求生成的图片数量，默认 1。"
                     },
+                    "size_mode": {
+                        "description": "尺寸模式",
+                        "type": "string",
+                        "default": "兼容旧配置",
+                        "hint": "兼容旧配置：继续使用原尺寸及留空推断规则。模型自动发送 auto。预设按下方档位和比例转换成 size；自定义读取图片尺寸。",
+                        "options": [
+                            "兼容旧配置",
+                            "模型自动",
+                            "预设尺寸",
+                            "自定义"
+                        ]
+                    },
+                    "size_resolution": {
+                        "description": "分辨率档位",
+                        "type": "string",
+                        "default": "1K",
+                        "hint": "仅预设模式生效。档位为便捷名称，实际像素见 Pages 预览。4K 预设仅支持 16:9、9:16，不会静默缩小。",
+                        "options": [
+                            "1K",
+                            "2K",
+                            "4K"
+                        ]
+                    },
+                    "size_ratio": {
+                        "description": "画面比例",
+                        "type": "string",
+                        "default": "1:1",
+                        "hint": "仅预设模式生效；模型或中转站可能只支持部分尺寸。",
+                        "options": [
+                            "1:1",
+                            "16:9",
+                            "9:16",
+                            "4:3",
+                            "3:4",
+                            "3:2",
+                            "2:3"
+                        ]
+                    },
                     "size": {
                         "description": "图片尺寸",
                         "type": "string",
                         "default": "",
                         "hint": "留空则自动推断：根据提示词关键词（横屏/竖屏/手机）或参考图比例选择合适尺寸；无参考图时默认 auto。也可手动指定，如 1024x1024、1536x1024、1024x1536、auto。"
+                    },
+                    "quality": {
+                        "description": "生成质量",
+                        "type": "string",
+                        "default": "不发送",
+                        "hint": "默认不发送以兼容中转站。xhigh/max 仅支持它们的模型可用；质量不等于分辨率。",
+                        "options": [
+                            "不发送",
+                            "auto",
+                            "low",
+                            "medium",
+                            "high",
+                            "xhigh",
+                            "max"
+                        ]
+                    },
+                    "output_format": {
+                        "description": "图片文件格式",
+                        "type": "string",
+                        "default": "不发送",
+                        "hint": "默认不发送。JPEG 不支持透明背景；与 Base64/URL 返回方式无关。",
+                        "options": [
+                            "不发送",
+                            "png",
+                            "jpeg",
+                            "webp"
+                        ]
+                    },
+                    "output_compression": {
+                        "description": "输出压缩参数",
+                        "type": "int",
+                        "default": -1,
+                        "hint": "-1 不发送；0～100 仅在明确选择 JPEG/WebP 时发送。"
+                    },
+                    "background": {
+                        "description": "图片背景",
+                        "type": "string",
+                        "default": "不发送",
+                        "hint": "默认不发送。透明背景要求模型支持，搭配 PNG/WebP。",
+                        "options": [
+                            "不发送",
+                            "auto",
+                            "opaque",
+                            "transparent"
+                        ]
+                    },
+                    "image_field_name": {
+                        "description": "图片上传字段",
+                        "type": "string",
+                        "default": "image",
+                        "hint": "image 保持现有中转站行为；image[] 为官方多图示例的字段形式。不会失败后自动换字段重新生图。",
+                        "options": [
+                            "image",
+                            "image[]"
+                        ]
                     }
                 }
             },
@@ -361,10 +454,10 @@
                         "hint": "留空则不使用代理。格式为 http://user:pass@host:port，例如 http://127.0.0.1:7890"
                     },
                     "max_retry": {
-                        "description": "最大重试次数",
+                        "description": "最大尝试次数",
                         "type": "int",
                         "default": 3,
-                        "hint": "本节点内请求失败时的最大重试次数"
+                        "hint": "本节点最多尝试次数，包含首次请求；原有尝试行为不变。"
                     },
                     "api_timeout": {
                         "description": "API请求超时(秒)",
@@ -434,10 +527,10 @@
                         "hint": "留空则不使用代理。格式为 http://user:pass@host:port，例如 http://127.0.0.1:7890"
                     },
                     "max_retry": {
-                        "description": "最大重试次数",
+                        "description": "最大尝试次数",
                         "type": "int",
                         "default": 3,
-                        "hint": "本节点内请求失败时的最大重试次数"
+                        "hint": "本节点最多尝试次数，包含首次请求；原有尝试行为不变。"
                     },
                     "api_timeout": {
                         "description": "API请求超时(秒)",
@@ -501,10 +594,10 @@
                         "hint": "留空则不使用代理。格式为 http://user:pass@host:port，例如 http://127.0.0.1:7890"
                     },
                     "max_retry": {
-                        "description": "最大重试次数",
+                        "description": "最大尝试次数",
                         "type": "int",
                         "default": 3,
-                        "hint": "本节点内请求失败时的最大重试次数"
+                        "hint": "本节点最多尝试次数，包含首次请求；原有尝试行为不变。"
                     },
                     "api_timeout": {
                         "description": "API请求超时(秒)",
@@ -568,10 +661,10 @@
                         "hint": "留空则不使用代理。格式为 http://user:pass@host:port，例如 http://127.0.0.1:7890"
                     },
                     "max_retry": {
-                        "description": "最大重试次数",
+                        "description": "最大尝试次数",
                         "type": "int",
                         "default": 3,
-                        "hint": "本节点内请求失败时的最大重试次数"
+                        "hint": "本节点最多尝试次数，包含首次请求；原有尝试行为不变。"
                     },
                     "api_timeout": {
                         "description": "API请求超时(秒)",

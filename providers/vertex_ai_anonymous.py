@@ -320,7 +320,7 @@ class VertexAIAnonymousProvider(BaseProvider):
                     logger.warning(log_msg)
             else:
                 logger.warning(
-                    f"Vertex AI API 调用失败，达到最大重试次数 ({attempt}/{self.max_retry}): {last_err}"
+                    f"Vertex AI API 调用失败，达到最大尝试次数 ({attempt}/{self.max_retry}): {last_err}"
                 )
 
         return f"生成失败: {last_err}"
