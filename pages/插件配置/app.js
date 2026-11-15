@@ -22,6 +22,8 @@ const DEFAULT_CACHE_PAGE_SIZE = 24;
 const DEFAULT_HISTORY_PAGE_SIZE = 20;
 const CAPABILITY_LABELS = { text2image: "文生图", image2image: "图生图", text2video: "文生视频", image2video: "图生视频" };
 const previewMemoryCache = new Map();
+const invalidFieldDrafts = new Map();
+let slideRequestSerial = 0;
 
 let memoryStorageFallback = {};
 let sortIdentityCounter = 0;
@@ -149,6 +151,9 @@ function sectionSnapshot(section) {
 function recomputeDirtySections() {
   const sections = Object.keys(DIRTY_LABELS);
   state.dirtySections = new Set(sections.filter((section) => (state.savedSnapshot[section] || "") !== sectionSnapshot(section)));
+  invalidFieldDrafts.forEach((draft, id) => {
+    if (byId(id)) state.dirtySections.add(draft.section);
+  });
   refreshDirtySummary();
 }
 
@@ -375,9 +380,22 @@ function imageDataParams(item, { thumbnail = false } = {}) {
   return null;
 }
 
+function imagePreviewKey(item, thumbnail = false) {
+  const identity = item?.path || (item?.preview_kind === "persona" ? item.url : "");
+  const key = identity ? `persona:${identity}` : item?.id;
+  return key ? `${thumbnail ? "thumb" : "full"}:${key}` : "";
+}
+
+function invalidateImagePreview(item) {
+  previewMemoryCache.delete(imagePreviewKey(item, true));
+  previewMemoryCache.delete(imagePreviewKey(item));
+  delete item.thumb_data_url;
+  delete item.data_url;
+}
+
 async function ensureImageDataUrl(item, { thumbnail = false } = {}) {
   if (!item) return "";
-  const cacheKey = thumbnail && item.id ? `thumb:${item.id}` : (!thumbnail && item.id ? `full:${item.id}` : "");
+  const cacheKey = imagePreviewKey(item, thumbnail);
   if (cacheKey && previewMemoryCache.has(cacheKey)) return previewMemoryCache.get(cacheKey);
   if (thumbnail && item.thumb_data_url) return item.thumb_data_url;
   if (!thumbnail && item.data_url) return item.data_url;
@@ -424,6 +442,7 @@ function loadPreviewImages(root = document) {
     if (!img || !item) return;
     card.dataset.previewLoading = "true";
     void runQueuedPreview(() => ensureImageDataUrl(item, { thumbnail: true })).then((src) => {
+      if (!img.isConnected) return;
       if (src) {
         img.src = src;
         card.classList.remove("is-broken");
@@ -439,6 +458,7 @@ function loadPreviewImages(root = document) {
 function showToast(message, type = "success") {
   const host = byId("toast-host");
   if (!host) return;
+  while (host.childElementCount >= 3) host.firstElementChild.remove();
   const toast = document.createElement("div");
   toast.className = `toast ${type === "error" ? "error" : ""}`;
   toast.textContent = message;
@@ -580,14 +600,17 @@ function createPipelineNode(templateKey) {
 
 function fieldControlHtml(section, index, key, field, value) {
   const type = field?.type || "string";
-  const baseAttrs = `data-bind="${section}" data-index="${index}" data-key="${escapeHtml(key)}" data-type="${escapeHtml(type)}"`;
+  const id = fieldControlId(section, index, key);
+  const draft = invalidFieldDrafts.get(id);
+  if (draft) value = draft.raw;
+  const baseAttrs = `id="${attrHtml(id)}" data-bind="${section}" data-index="${index}" data-key="${escapeHtml(key)}" data-type="${escapeHtml(type)}" aria-describedby="${attrHtml(id)}-hint ${attrHtml(id)}-error" ${draft ? 'class="input-error" aria-invalid="true"' : ""}`;
   if (section === "pipeline" && key === "size" && state.pipeline[index]?.__template_key === "openai_images" && state.pipeline[index]?.size_mode === "自定义") {
     const [width = "", height = ""] = String(value || "").toLowerCase().split("x");
-    return `<span class="inline-check"><input type="number" min="1" step="1" aria-label="宽度（像素）" placeholder="宽度 px" data-images-size-index="${index}" data-images-width value="${escapeHtml(width)}" /> × <input type="number" min="1" step="1" aria-label="高度（像素）" placeholder="高度 px" data-images-size-index="${index}" data-images-height value="${escapeHtml(height)}" /></span>`;
+    return `<div class="numeric-pair"><input id="${id}-width" type="text" inputmode="numeric" data-number-type="int" data-min="1" aria-label="宽度（像素）" placeholder="宽度 px" data-images-size-index="${index}" data-images-width value="${escapeHtml(width)}" /><span>×</span><input id="${id}-height" type="text" inputmode="numeric" data-number-type="int" data-min="1" aria-label="高度（像素）" placeholder="高度 px" data-images-size-index="${index}" data-images-height value="${escapeHtml(height)}" /></div>`;
   }
   if (key === "capabilities") {
     const selected = new Set(Array.isArray(value) ? value : ["text2image", "image2image"]);
-    return `<div class="capability-checklist" data-bind="${section}" data-index="${index}" data-key="capabilities" data-type="capabilities">${Object.entries(CAPABILITY_LABELS).map(([cap, label]) => `<label class="inline-check"><input type="checkbox" data-capability-value="${cap}" ${selected.has(cap) ? "checked" : ""} /><span>${label}</span></label>`).join("")}</div>`;
+    return `<div class="capability-checklist" ${baseAttrs.replace('data-type="list"', 'data-type="capabilities"')}>${Object.entries(CAPABILITY_LABELS).map(([cap, label]) => `<label class="inline-check"><input type="checkbox" data-capability-value="${cap}" ${selected.has(cap) ? "checked" : ""} /><span>${label}</span></label>`).join("")}</div>`;
   }
   if (field?.options?.length) {
     const options = [...field.options];
@@ -600,17 +623,17 @@ function fieldControlHtml(section, index, key, field, value) {
     return `<label class="inline-check"><input type="checkbox" ${baseAttrs} ${value ? "checked" : ""} /><span>${escapeHtml(field?.description || key)}</span></label>`;
   }
   if (type === "text") {
-    return `<textarea ${baseAttrs} rows="4">${escapeHtml(value ?? "")}</textarea>`;
+    return `<textarea ${baseAttrs} rows="3">${escapeHtml(value ?? "")}</textarea>`;
   }
   if (type === "list") {
-    return `<textarea ${baseAttrs} rows="4" placeholder="每行一个值">${escapeHtml((Array.isArray(value) ? value : splitLines(value)).join("\n"))}</textarea>`;
+    return `<textarea ${baseAttrs} rows="3" placeholder="每行一个值">${escapeHtml((Array.isArray(value) ? value : splitLines(value)).join("\n"))}</textarea>`;
   }
   if (type === "object") {
-    return `<textarea ${baseAttrs} rows="5" placeholder="JSON 对象">${escapeHtml(JSON.stringify(value ?? {}, null, 2))}</textarea>`;
+    return `<textarea ${baseAttrs} rows="4" placeholder="JSON 对象">${escapeHtml(draft ? draft.raw : JSON.stringify(value ?? {}, null, 2))}</textarea>`;
   }
   if (type === "int" || type === "float") {
-    const step = type === "float" ? "0.1" : "1";
-    return `<input ${baseAttrs} type="number" step="${step}" value="${escapeHtml(value ?? "")}" />`;
+    const bounds = `${field.slider?.min != null ? `data-min="${attrHtml(field.slider.min)}"` : ""} ${field.slider?.max != null ? `data-max="${attrHtml(field.slider.max)}"` : ""}`;
+    return `<input ${baseAttrs} type="text" inputmode="${type === "int" ? "numeric" : "decimal"}" data-number-type="${type}" ${bounds} autocomplete="off" spellcheck="false" value="${escapeHtml(value ?? "")}" />`;
   }
   return `<input ${baseAttrs} type="text" value="${escapeHtml(value ?? "")}" />`;
 }
@@ -638,20 +661,90 @@ function imagesSizePreview(node) {
     ? "请输入宽x高，例如 2048x1152" : "沿用旧配置：按提示词或参考图推断尺寸";
 }
 
+function fieldControlId(section, index, key) {
+  const owner = section === "pipeline" ? state.pipeline[index]
+    : section === "style" ? state.selfie.styles[index]
+      : state.settings[section.slice(SETTINGS_SECTION_PREFIX.length)];
+  return `${owner ? sortIdForObject("field", owner) : `field-${section}-${index}`}-${key}`;
+}
+
 function fieldHtml(section, index, key, field, value) {
   const type = field?.type || "string";
   const label = field?.description || key;
+  const id = fieldControlId(section, index, key);
+  const group = key === "capabilities" || (key === "size" && state.pipeline[index]?.__template_key === "openai_images" && state.pipeline[index]?.size_mode === "自定义");
   const wide = type === "text" || type === "list" || type === "object" ? " field-wide" : "";
-  if (type === "bool") {
-    return `<div class="form-field${wide}">${fieldControlHtml(section, index, key, field, value)}${field?.hint ? `<small>${escapeHtml(field.hint)}</small>` : ""}</div>`;
-  }
+  const tag = group ? "fieldset" : "div";
+  const title = type === "bool" ? "" : group
+    ? `<legend>${escapeHtml(label)}</legend>`
+    : `<label for="${attrHtml(id)}">${escapeHtml(label)}</label>`;
+  const hintText = `<small id="${attrHtml(id)}-hint" ${field?.hint ? "" : "hidden"}>${escapeHtml(field?.hint || "")}</small>`;
+  const hint = (field?.hint?.length || 0) > 90 && !field.obvious_hint
+    ? `<details class="field-help"><summary>使用说明</summary>${hintText}</details>` : hintText;
   return `
-    <label class="form-field${wide}">
-      <span>${escapeHtml(label)}</span>
+    <${tag} class="form-field${wide}">
+      ${title}
       ${fieldControlHtml(section, index, key, field, value)}
-      ${field?.hint ? `<small>${escapeHtml(field.hint)}</small>` : ""}
-    </label>
+      ${hint}
+      <small class="field-error" id="${attrHtml(id)}-error" role="status">${escapeHtml(invalidFieldDrafts.get(id)?.error || "")}</small>
+    </${tag}>
   `;
+}
+
+function setInputError(input, error) {
+  input.classList.toggle("input-error", Boolean(error));
+  input.setAttribute("aria-invalid", String(Boolean(error)));
+  input.setCustomValidity(error);
+  const section = input.dataset.bind?.startsWith(SETTINGS_SECTION_PREFIX) ? "settings"
+    : input.dataset.bind === "style" ? "styles"
+      : input.dataset.bind || (input.dataset.imagesSizeIndex !== undefined ? "pipeline" : "cache");
+  if (error) invalidFieldDrafts.set(input.id, { raw: input.value, error, section });
+  else invalidFieldDrafts.delete(input.id);
+  const message = byId(`${input.id}-error`) || input.closest(".form-field, .cache-field")?.querySelector(".field-error");
+  if (message) message.textContent = error;
+  return !error;
+}
+
+function validateEditorInput(input) {
+  if (input.dataset.numberType) {
+    const raw = input.value.trim();
+    if (!raw && input.dataset.allowEmpty === "true") return setInputError(input, "");
+    const integer = input.dataset.numberType === "int";
+    const syntax = integer ? /^[+-]?[0-9]+$/ : /^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/;
+    const number = Number(raw);
+    let error = !raw ? "请填写数值，不能留空。" : !syntax.test(raw) || !Number.isFinite(number)
+      ? (integer ? "请填写有效的整数。" : "请填写有效的数字。") : "";
+    if (!error && integer && !Number.isSafeInteger(number)) error = "整数超出可精确保存的范围。";
+    if (!error && input.dataset.min !== undefined && number < Number(input.dataset.min)) error = `不能小于 ${input.dataset.min}。`;
+    if (!error && input.dataset.max !== undefined && number > Number(input.dataset.max)) error = `不能大于 ${input.dataset.max}。`;
+    return setInputError(input, error);
+  }
+  if (input.dataset.type === "object") {
+    try {
+      const value = input.value.trim() ? JSON.parse(input.value) : {};
+      if (!value || Array.isArray(value) || typeof value !== "object") throw new Error();
+      return setInputError(input, "");
+    } catch {
+      return setInputError(input, "请填写有效的 JSON 对象。");
+    }
+  }
+  return true;
+}
+
+function validateEditorInputs(root = document) {
+  root.querySelectorAll("[data-number-type], textarea[data-type='object']").forEach(validateEditorInput);
+  let invalid = root.querySelector(".input-error");
+  if (!invalid) return true;
+  const id = invalid.id;
+  const panel = invalid.closest("[data-panel]");
+  if (panel) switchTab(panel.dataset.panel);
+  const card = invalid.closest(".node-card");
+  if (card) { state.expandedPipeline.add(Number(card.dataset.index)); renderPipeline(); }
+  invalid = byId(id) || invalid;
+  invalid.scrollIntoView({ block: "center" });
+  invalid.focus({ preventScroll: true });
+  showToast("请先修正标出的配置项，当前修改尚未保存。", "error");
+  return false;
 }
 
 function updateBoundValueByParts(section, index, key, value) {
@@ -673,16 +766,13 @@ function updateBoundValue(input) {
   let value = input.value;
   if (type === "bool") value = input.checked;
   if (type === "list") value = splitLines(input.value);
-  if (type === "int") value = input.value.trim() === "" ? 0 : parseInt(input.value, 10) || 0;
-  if (type === "float") value = input.value.trim() === "" ? 0 : parseFloat(input.value) || 0;
+  if (["int", "float", "object"].includes(type) && !validateEditorInput(input)) {
+    recomputeDirtySections();
+    return;
+  }
+  if (type === "int" || type === "float") value = Number(input.value.trim());
   if (type === "object") {
-    try {
-      value = input.value.trim() ? JSON.parse(input.value) : {};
-    } catch {
-      input.classList.add("input-error");
-      return;
-    }
-    input.classList.remove("input-error");
+    value = input.value.trim() ? JSON.parse(input.value) : {};
   }
 
   if (section.startsWith(SETTINGS_SECTION_PREFIX)) {
@@ -884,6 +974,7 @@ function renderPipeline() {
             <button class="icon-btn" data-action="pipeline-up" data-index="${index}" type="button" title="上移">↑</button>
             <button class="icon-btn" data-action="pipeline-down" data-index="${index}" type="button" title="下移">↓</button>
             <button class="btn" data-action="pipeline-toggle" data-index="${index}" type="button">${expanded ? "收起" : "展开"}</button>
+            <button class="btn" data-action="pipeline-copy" data-index="${index}" type="button" title="复制到此节点下方">复制</button>
             <label class="switch-row node-enable-switch" title="启用此节点">
               <input data-bind="pipeline" data-index="${index}" data-key="enabled" data-type="bool" type="checkbox" ${node.enabled === false ? "" : "checked"} />
               <span class="switch-ui"></span>
@@ -1003,10 +1094,11 @@ function sectionPayload(section) {
 }
 
 async function saveAllConfig(button) {
+  if (!validateEditorInputs()) return;
   if (!state.dirtySections.size || state.savingConfig) return;
   const sections = [...state.dirtySections];
   const payload = {};
-  if (state.dirtySections.has("pipeline")) payload.pipeline = state.pipeline;
+  if (state.dirtySections.has("pipeline")) payload.pipeline = deepClone(state.pipeline);
   if (state.dirtySections.has("templates")) payload.prompt_templates = normalizedPromptTemplatesPayload();
   if (state.dirtySections.has("settings")) payload.settings = deepClone(state.settings);
   if (state.dirtySections.has("cache")) {
@@ -1033,6 +1125,7 @@ async function saveAllConfig(button) {
     }
   }
 
+  const submittedSnapshots = Object.fromEntries(sections.map((section) => [section, sectionSnapshot(section)]));
   state.savingConfig = true;
   setBusy(button, true, "保存中...");
   refreshDirtySummary();
@@ -1040,11 +1133,12 @@ async function saveAllConfig(button) {
   state.savingConfig = false;
   setBusy(button, false);
   if (result?.success !== false) {
-    if (state.dirtySections.has("templates")) {
+    if (sections.includes("templates") && sectionSnapshot("templates") === submittedSnapshots.templates) {
       state.promptTemplates = normalizedPromptTemplatesPayload();
       renderPromptTemplates();
     }
-    clearDirty(sections);
+    sections.forEach((section) => { state.savedSnapshot[section] = submittedSnapshots[section]; });
+    recomputeDirtySections();
     showToast(`已保存：${sections.map((section) => DIRTY_LABELS[section] || section).join("、")}`);
     if (sections.includes("cache")) await loadCache();
   }
@@ -1654,6 +1748,7 @@ async function loadCache(page = state.cachePage, pageSize = state.cachePageSize)
     state.cachePage = Number(result.page || state.cachePage || 1);
     state.cachePageSize = normalizeCachePageSize(result.page_size || state.cachePageSize);
     state.cacheTotalPages = Number(result.total_pages || 1);
+    const pendingConfig = state.dirtySections.has("cache") ? sectionPayload("cache") : null;
     state.cache = {
       ...state.cache,
       enabled: Boolean(result.enabled),
@@ -1668,6 +1763,7 @@ async function loadCache(page = state.cachePage, pageSize = state.cachePageSize)
       favorite_count: Number(result.favorite_count || 0),
       favorite_bytes: Number(result.favorite_bytes || 0),
       images: Array.isArray(result.images) ? result.images : [],
+      ...(pendingConfig || {}),
     };
     renderCacheGrid();
     setPageStatus();
@@ -1794,6 +1890,8 @@ function renderSettings() {
   if (!host) return;
   const schema = state.schema?.settings || {};
   const groups = Object.entries(schema);
+  const jump = byId("settings-jump");
+  if (jump) jump.innerHTML = groups.map(([group, entry]) => `<button class="btn" type="button" data-action="settings-jump" data-group="${attrHtml(group)}">${escapeHtml(entry.description || group)}</button>`).join("");
   if (!groups.length) {
     host.innerHTML = `<div class="empty">没有可编辑的设置项。</div>`;
     return;
@@ -1810,7 +1908,7 @@ function renderSettings() {
       ))
       .join("");
     return `
-      <section class="settings-card">
+      <section class="settings-card" id="settings-group-${attrHtml(group)}">
         <div class="panel-title">${escapeHtml(entry.description || group)}</div>
         <div class="form-grid">${fields}</div>
       </section>
@@ -1974,6 +2072,7 @@ async function deletePersonaImage(index) {
     showToast("后端没有找到这张参考图，请先保存人设后再试。", "error");
     return;
   }
+  invalidateImagePreview(image);
   persona.ref_images = persona.ref_images.filter((path) => path !== image.path);
   persona.ref_image_items.splice(index, 1);
   renderPersonaEditor();
@@ -2082,6 +2181,7 @@ function openSlideshow(items, startIndex = 0) {
 }
 
 function closeSlideshow() {
+  slideRequestSerial += 1;
   const modal = byId("slideshow");
   modal.classList.remove("active");
   modal.setAttribute("aria-hidden", "true");
@@ -2089,6 +2189,7 @@ function closeSlideshow() {
   if (image) {
     image.onload = null;
     image.onerror = null;
+    image.removeAttribute("src");
   }
   setSlideState("loading", "正在加载图片…");
   document.removeEventListener("keydown", onSlideKeydown);
@@ -2102,10 +2203,11 @@ function setSlideState(nextState, message = "") {
 }
 
 async function updateSlide() {
+  const requestSerial = ++slideRequestSerial;
   const item = state.slideItems[state.slideIndex];
   if (!item) return;
   updateSlideFavorite();
-  const expectedIndex = state.slideIndex;
+  const isCurrent = () => requestSerial === slideRequestSerial && state.slideItems[state.slideIndex] === item;
   const image = byId("slide-img");
   image.onload = null;
   image.onerror = null;
@@ -2115,7 +2217,7 @@ async function updateSlide() {
   byId("slide-info").innerHTML = slideInfoHtml(item);
   byId("slide-count").textContent = `${state.slideIndex + 1} / ${state.slideItems.length}`;
   const src = await ensureImageDataUrl(item);
-  if (expectedIndex !== state.slideIndex) return;
+  if (!isCurrent()) return;
   if (!src) {
     setSlideState("error", "图片加载失败，可能是网络问题或文件已不存在。");
     showToast("这张图片未加载成功。", "error");
@@ -2123,14 +2225,14 @@ async function updateSlide() {
   }
   // 拿到地址不代表能显示：data URL 之外的回退地址仍可能在弱网下失败。
   image.onload = () => {
-    if (expectedIndex !== state.slideIndex) return;
+    if (!isCurrent()) return;
     if (image.naturalWidth > 0 && image.naturalHeight > 0) {
       byId("slide-info").innerHTML = slideInfoHtml(item, `${image.naturalWidth} x ${image.naturalHeight}`);
     }
     setSlideState("ready");
   };
   image.onerror = () => {
-    if (expectedIndex !== state.slideIndex) return;
+    if (!isCurrent()) return;
     // 清掉失败的地址，浏览器就不会再为这张图保留裂图占位。
     image.removeAttribute("src");
     setSlideState("error", "图片加载失败，可能是网络问题或文件已不存在。");
@@ -2167,7 +2269,7 @@ function personaSlideItems(persona) {
   return persona.ref_image_items
     .filter((image) => image?.exists !== false && image?.url)
     .map((image, index) => ({
-      id: `persona-${index + 1}`,
+      id: `persona:${image.path || image.url}`,
       preview_kind: "persona",
       path: image.path || "",
       url: image.url,
@@ -2251,6 +2353,7 @@ async function loadConfigBundle() {
   setPageStatus("正在加载当前插件配置...");
   const result = await callApi("加载配置", () => bridge.apiGet("get_config_bundle"));
   if (result?.success === false) return;
+  invalidFieldDrafts.clear();
   state.schema = result.schema || {};
   const config = result.config || {};
   state.pipeline = Array.isArray(config.pipeline) ? deepClone(config.pipeline) : [];
@@ -2291,7 +2394,38 @@ async function loadConfigBundle() {
   setPageStatus();
 }
 
+function bindStickyLayout() {
+  const measure = (element) => {
+    const height = Math.ceil(element.getBoundingClientRect().height);
+    if (element.classList.contains("sidebar-save")) {
+      document.documentElement.style.setProperty("--save-bar-height", `${getComputedStyle(element).position === "fixed" ? height : 0}px`);
+    } else if (height) {
+      element.parentElement.style.setProperty("--section-head-height", `${height}px`);
+    }
+  };
+  const elements = [...document.querySelectorAll(".page-head, .style-head, .section-head, .sidebar-save")];
+  if (typeof ResizeObserver !== "undefined") {
+    const observer = new ResizeObserver((entries) => entries.forEach(({ target }) => measure(target)));
+    elements.forEach((element) => observer.observe(element));
+  } else {
+    window.addEventListener("resize", () => elements.forEach(measure));
+  }
+  elements.forEach(measure);
+  const media = window.matchMedia("(max-width: 820px)");
+  const details = byId("history-filter-details");
+  const syncFilters = () => { if (details) details.open = !media.matches; };
+  syncFilters();
+  media.addEventListener?.("change", syncFilters);
+}
+
 function bindEvents() {
+  bindStickyLayout();
+  // 关闭状态的下拉框不应因页面滚动而改值；展开后的菜单保留原生交互。
+  document.addEventListener("wheel", (event) => {
+    const select = event.target.closest?.("select");
+    if (!select || select !== document.activeElement) return;
+    try { if (!select.matches(":open")) select.blur(); } catch { /* 旧浏览器保留原生菜单行为。 */ }
+  }, { capture: true, passive: true });
   bindChartResize();
   byId("filter-keyword")?.addEventListener("input", scheduleHistoryFilter);
   byId("filter-keyword")?.addEventListener("keydown", (event) => {
@@ -2418,6 +2552,10 @@ function bindEvents() {
     if (!actionButton) return;
     const action = actionButton.dataset.action;
     const index = Number(actionButton.dataset.index);
+    if (action === "settings-jump") {
+      byId(`settings-group-${actionButton.dataset.group}`)?.scrollIntoView({ block: "start", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+      return;
+    }
     if (action === "image-favorite") {
       await toggleImageFavorite(actionButton.dataset.cacheId);
       return;
@@ -2426,6 +2564,20 @@ function bindEvents() {
     if (action === "pipeline-toggle") {
       state.expandedPipeline.has(index) ? state.expandedPipeline.delete(index) : state.expandedPipeline.add(index);
       renderPipeline();
+    }
+    if (action === "pipeline-copy") {
+      const node = state.pipeline[index];
+      if (!node || !validateEditorInputs(actionButton.closest(".node-card"))) return;
+      state.pipeline.splice(index + 1, 0, deepClone(node));
+      state.expandedPipeline = new Set([...state.expandedPipeline].map((value) => value > index ? value + 1 : value));
+      state.expandedPipeline.add(index + 1);
+      renderPipeline();
+      markDirty("pipeline");
+      const copy = byId("pipeline-list")?.querySelector(`[data-index="${index + 1}"]`);
+      copy?.classList.add("is-new");
+      copy?.scrollIntoView({ block: "nearest", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+      copy?.querySelector('[data-action="pipeline-toggle"]')?.focus({ preventScroll: true });
+      showToast("已复制到下方，保存后生效。");
     }
     if (action === "pipeline-delete") {
       const node = state.pipeline[index];
@@ -2436,7 +2588,7 @@ function bindEvents() {
       });
       if (confirmed) {
         state.pipeline.splice(index, 1);
-        state.expandedPipeline.delete(index);
+        state.expandedPipeline = new Set([...state.expandedPipeline].filter((value) => value !== index).map((value) => value > index ? value - 1 : value));
         renderPipeline();
         markDirty("pipeline");
       }
@@ -2466,7 +2618,7 @@ function bindEvents() {
       });
       if (confirmed) {
         state.promptTemplates.splice(index, 1);
-        state.expandedTemplates.delete(index);
+        state.expandedTemplates = new Set([...state.expandedTemplates].filter((value) => value !== index).map((value) => value > index ? value - 1 : value));
         renderPromptTemplates();
         markDirty("templates");
       }
@@ -2546,6 +2698,7 @@ function bindEvents() {
   });
 
   document.body.addEventListener("input", (event) => {
+    if (event.target.matches("[data-number-type]")) validateEditorInput(event.target);
     if (event.target.dataset.imagesSizeIndex !== undefined) {
       const index = Number(event.target.dataset.imagesSizeIndex);
       const card = event.target.closest(".node-card");

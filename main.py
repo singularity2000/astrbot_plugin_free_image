@@ -22,6 +22,13 @@ from quart import jsonify, request, send_file
 
 from .commands import CommandHandlers
 from .history_cache import ImageHistoryCache
+from .nsfw import (
+    ImageDelivery,
+    ImageDeliveryError,
+    NSFW_PARAMETER_DESCRIPTION,
+    parse_nsfw_command,
+    resolve_image_delivery,
+)
 from .pipeline import ImageGenPipeline
 from .providers.base import ReferenceLogContext
 from .quota import PersistenceManager, UsageGuard
@@ -46,7 +53,7 @@ SETTINGS_GROUPS = ("general", "access_control", "quota", "checkin", "llm_tools")
     PLUGIN_NAME,
     "Singularity2000",
     "文生图、图生图，可自定义模型能力与提示词模板，兼容多种端点",
-    "3.8.1",
+    "3.9.0",
     "https://github.com/singularity2000/astrbot_plugin_free_image",
 )
 class ImageGenerationPlugin(Star):
@@ -123,6 +130,16 @@ class ImageGenerationPlugin(Star):
                 styles_info = [f"{s['id']}（{s['name']}）" for s in _all_styles(self.conf) if s.get("id") and s.get("name")]
                 style_hint = f"可选。指定风格ID，留空由插件自动选择。当前已配置：{', '.join(styles_info)}" if styles_info else "可选。指定风格ID，留空由插件自动选择"
                 selfie_tool.parameters["properties"]["style_id"]["description"] = style_hint
+
+        for image_tool in (tool, selfie_tool):
+            if image_tool:
+                image_tool.parameters.setdefault("properties", {})["nsfw"] = {
+                    "type": "boolean", "default": False,
+                    "description": NSFW_PARAMETER_DESCRIPTION,
+                }
+                required = image_tool.parameters.get("required", [])
+                if "nsfw" in required:
+                    image_tool.parameters["required"] = [name for name in required if name != "nsfw"]
 
     def _rebuild_runtime_from_config(self) -> None:
         if self.pipeline:
@@ -920,14 +937,34 @@ class ImageGenerationPlugin(Star):
             logger.warning(f"工具参考图读取失败（{type(exc).__name__}）")
             return [], "参考图片读取失败，请重新发送图片后重试。"
 
+    def _resolve_tool_delivery(self, event: AstrMessageEvent, nsfw: bool) -> ImageDelivery:
+        """Explicit command suffix wins over an omitted/false LLM argument."""
+        if not isinstance(nsfw, bool):
+            raise ImageDeliveryError("nsfw 参数必须为布尔值 true 或 false。")
+        explicit = parse_nsfw_command(
+            self._get_plain_message_text(event, strip_wake_prefix=True),
+            ["文生图", "图生图", "自拍", *self.prompt_map],
+        )
+        return resolve_image_delivery(
+            event, self.conf, nsfw=nsfw or explicit is not None,
+            mode=explicit.mode if explicit else None,
+        )
+
     @filter.llm_tool(name="image_generation")
-    async def image_generation(self, event: AstrMessageEvent, prompt: str, count: int = 1):
+    async def image_generation(self, event: AstrMessageEvent, prompt: str, count: int = 1, nsfw: bool = False):
         """专业的文生图、图生图工具。理解用户语义，仅当用户需要你生图，或修改图片内容时才调用此工具。
 
         Args:
             prompt(string): Change the user's input into a professional image generation prompt while strictly preserving the original intent.
             count(int): 生图数量（1~3），若不指定，默认为1。除非用户明确要求，否则跳过此参数。
+            nsfw(boolean): 默认为 false。若用户明确要求启用，或你认为此次生图可能涉及 NSFW 内容，请设为 true；否则忽略此参数或填 false。此参数仅控制生成结果的发送方式。
         """
+        try:
+            delivery = self._resolve_tool_delivery(event, nsfw)
+        except ImageDeliveryError as exc:
+            await self._send_plain_direct(event, str(exc))
+            event.stop_event()
+            return
         # 智能决策：有显式图片/引用图则图生图；@ 头像和发送者头像兜底不触发 LLM 图生图。
         # AstrBot v4.26+ 的 LLM 场景中，引用图可能不在 Reply.chain，而在 provider_request/quoted extractor 中。
         is_i2i = bool(self.iwf and await self.iwf.has_context_images(event))
@@ -957,6 +994,7 @@ class ImageGenerationPlugin(Star):
                     generation_mode="image2image" if is_i2i else "text2image",
                     prepared_images=prepared_images,
                     usage_checked=True,
+                    delivery=delivery,
                 ):
                     await self._send_with_auto_quote(event, result, request_source="llm_tool")
             except Exception as e:
@@ -1121,6 +1159,7 @@ class ImageGenerationPlugin(Star):
         generation_mode: str | None = None,
         prepared_images: list[bytes] | None = None,
         usage_checked: bool = False,
+        delivery: ImageDelivery | None = None,
     ):
         if not self.pipeline or not self.sender or not self.usage_guard:
             yield self._quoted_plain_result(event, "❌ 插件尚未完成初始化，请稍后再试。")
@@ -1225,6 +1264,7 @@ class ImageGenerationPlugin(Star):
                 event, prompt, images_to_process, count, available,
                 is_i2i, display_name, concise_mode, request_source, model_index,
                 generation_mode, request_log,
+                delivery=delivery,
             ):
                 yield res
         else:
@@ -1232,6 +1272,7 @@ class ImageGenerationPlugin(Star):
                 event, prompt, images_to_process, count, available,
                 is_master, is_i2i, display_name, concise_mode,
                 request_source, sender_id, group_id, model_index, generation_mode, request_log,
+                delivery=delivery,
             ):
                 yield res
 
@@ -1252,6 +1293,7 @@ class ImageGenerationPlugin(Star):
         model_index: Optional[int],
         generation_mode: str,
         request_log: ReferenceLogContext | None = None,
+        delivery: ImageDelivery | None = None,
     ):
         """非管理员串行生图，无间隔。管理员单张也走这里。"""
         request_log = request_log or ReferenceLogContext(
@@ -1275,6 +1317,7 @@ class ImageGenerationPlugin(Star):
                 event, prompt, res, model_name, elapsed, suffix, i, count,
                 is_master, is_i2i, display_name, concise_mode,
                 request_source, sender_id, group_id, model_index, generation_mode,
+                delivery=delivery,
             ):
                 yield msg
 
@@ -1292,6 +1335,7 @@ class ImageGenerationPlugin(Star):
         model_index: Optional[int],
         generation_mode: str,
         request_log: ReferenceLogContext | None = None,
+        delivery: ImageDelivery | None = None,
     ):
         """管理员并发生图，彼此间隔2秒防抖启动。不扣费，无竞态。"""
         request_log = request_log or ReferenceLogContext(
@@ -1335,6 +1379,7 @@ class ImageGenerationPlugin(Star):
                 True,  # is_master=True（并发仅管理员）
                 is_i2i, display_name, concise_mode,
                 request_source, sender_id, group_id, model_index, generation_mode,
+                delivery=delivery,
             ):
                 yield msg
 
@@ -1404,6 +1449,7 @@ class ImageGenerationPlugin(Star):
         group_id: str,
         model_index: Optional[int],
         generation_mode: str,
+        delivery: ImageDelivery | None = None,
     ):
         """处理单次 pipeline.execute 的结果，yield 出消息。扣费在非管理员时执行。"""
         image_results = self.sender.normalize_image_results(res)
@@ -1433,15 +1479,25 @@ class ImageGenerationPlugin(Star):
                 model_index=model_index,
             )
             logger.info(caption_text)
-            async for msg in self.sender.yield_success_images(
-                event=event,
-                images=image_results,
-                caption_text=caption_text,
-                concise_mode=concise_mode,
-                request_source=request_source,
-            ):
-                yield msg
+            try:
+                async for msg in self.sender.yield_success_images(
+                    event=event,
+                    images=image_results,
+                    caption_text=caption_text,
+                    concise_mode=concise_mode,
+                    request_source=request_source,
+                    delivery=delivery, elapsed=elapsed, model_name=model_name,
+                    batch_index=i + 1, batch_count=count,
+                ):
+                    yield msg
+            except ImageDeliveryError as exc:
+                yield self._quoted_plain_result(event, f"{exc}{suffix}")
         elif isinstance(res, dict) and res.get("type") == "video" and res.get("url"):
+            if delivery and delivery.mode != "normal":
+                yield self._quoted_plain_result(
+                    event, f"模型返回了视频，但 NSFW 模式目前只支持图片。本次未发送视频，未扣除次数。{suffix}"
+                )
+                return
             if deduction_error := await self.usage_guard.deduct_after_success(event, is_master):
                 yield self._quoted_plain_result(event, f"{deduction_error}{suffix}")
                 return
@@ -1548,7 +1604,7 @@ class ImageGenerationPlugin(Star):
         async for res in self.commands.on_checkin(event):
             yield res
 
-    @filter.command("画图增加用户次数", prefix_optional=True, desc="管理员为指定用户增加永久生图次数。示例：画图增加用户次数 @某人 10。")
+    @filter.command("画图增加用户次数", prefix_optional=True, desc="管理员调整用户次数：正数增加永久次数，负数先扣永久再扣今日额度，最低为零。示例：画图增加用户次数 @某人 -10。")
     async def on_add_user_counts(self, event: AstrMessageEvent):
         async for res in self.commands.on_add_user_counts(event):
             yield res
@@ -1576,6 +1632,7 @@ class ImageGenerationPlugin(Star):
         model_index: Optional[int] = None,
         prepared_images: list[bytes] | None = None,
         usage_checked: bool = False,
+        delivery: ImageDelivery | None = None,
     ) -> str:
         """执行自拍生图，返回状态字符串。图片通过 event.send 直接发送。"""
         group_id = event.get_group_id()
@@ -1704,11 +1761,18 @@ class ImageGenerationPlugin(Star):
                         extra={"persona_name": persona_name, "style_name": style_name},
                     )
                     logger.info(caption_text)
-                    async for msg in self.sender.yield_success_images(
-                        event=event, images=image_results, caption_text=caption_text,
-                        concise_mode=concise, request_source=request_source,
-                    ):
-                        await event.send(msg)
+                    try:
+                        async for msg in self.sender.yield_success_images(
+                            event=event, images=image_results, caption_text=caption_text,
+                            concise_mode=concise, request_source=request_source,
+                            delivery=delivery, elapsed=elapsed, model_name=model_name,
+                            batch_index=i + 1, batch_count=count,
+                        ):
+                            await event.send(msg)
+                    except ImageDeliveryError as exc:
+                        await self._send_plain_direct(event, f"{exc}{suffix}")
+                        last_result = str(exc)
+                        continue
                     last_result = f"已成功为「{persona_name}」生成自拍（{elapsed:.1f}s），已发送给用户。"
                     had_success = True
                 else:
@@ -1778,11 +1842,18 @@ class ImageGenerationPlugin(Star):
                         extra={"persona_name": persona_name, "style_name": style_name},
                     )
                     logger.info(caption_text)
-                    async for msg in self.sender.yield_success_images(
-                        event=event, images=image_results, caption_text=caption_text,
-                        concise_mode=concise, request_source=request_source,
-                    ):
-                        await event.send(msg)
+                    try:
+                        async for msg in self.sender.yield_success_images(
+                            event=event, images=image_results, caption_text=caption_text,
+                            concise_mode=concise, request_source=request_source,
+                            delivery=delivery, elapsed=elapsed, model_name=model_name,
+                            batch_index=i + 1, batch_count=count,
+                        ):
+                            await event.send(msg)
+                    except ImageDeliveryError as exc:
+                        await self._send_plain_direct(event, f"{exc}{suffix}")
+                        last_result = str(exc)
+                        continue
                     last_result = f"已成功为「{persona_name}」生成自拍（{elapsed:.1f}s），已发送给用户。"
                     had_success = True
                 else:
@@ -1838,9 +1909,13 @@ class ImageGenerationPlugin(Star):
         is_llm_tool: bool = False,
         count: int = 1,
         model_index: Optional[int] = None,
+        delivery: ImageDelivery | None = None,
     ):
         """命令模式专用 async generator 包装。"""
-        result = await self._exec_selfie(event, action, style_id_override, is_llm_tool, count, model_index)
+        result = await self._exec_selfie(
+            event, action, style_id_override, is_llm_tool, count, model_index,
+            delivery=delivery,
+        )
         # 命令模式下错误已在 _exec_selfie 里直接发送，此处无需再 yield
         _ = result  # suppress unused variable warning
         return
@@ -1867,6 +1942,7 @@ class ImageGenerationPlugin(Star):
         action: str,
         style_id: str = "",
         count: int = 1,
+        nsfw: bool = False,
     ):
         """以你的形象生成图片。理解用户语义，在用户要求生成“有你出镜”的图片时（如自拍、合影、展示形象等）须调用此工具，区别于常规生图。此工具自带你的形象参考图。
 
@@ -1874,7 +1950,14 @@ class ImageGenerationPlugin(Star):
             action(string): 按照用户要求，合理补充照片的细节，可选：服装、姿势、场景、神态。可用第一人称的“我”称呼自己。避免描述人物的身份、头部外貌，以防止和参考图矛盾。
             style_id(string): 可选。指定风格 ID 或名称，例如 cinematic、selfie_realistic。留空由插件自动选择。
             count(int): 生图数量（1~3），若不指定，默认为1。除非用户明确要求，否则跳过此参数。
+            nsfw(boolean): 默认为 false。若用户明确要求启用，或你认为此次生图可能涉及 NSFW 内容，请设为 true；否则忽略此参数或填 false。此参数仅控制生成结果的发送方式。
         """
+        try:
+            delivery = self._resolve_tool_delivery(event, nsfw)
+        except ImageDeliveryError as exc:
+            await self._send_plain_direct(event, str(exc))
+            event.stop_event()
+            return
         # clamp count 到 1~3
         try:
             count = max(1, min(3, int(count)))
@@ -1914,6 +1997,7 @@ class ImageGenerationPlugin(Star):
                     count=count,
                     prepared_images=prepared_images,
                     usage_checked=True,
+                    delivery=delivery,
                 )
                 if result_msg.startswith("自拍失败"):
                     await self._explain_selfie_failure_with_llm(event, result_msg)

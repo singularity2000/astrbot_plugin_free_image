@@ -53,7 +53,6 @@
         <section class="tab-panel active" data-panel="pipeline">
           <div class="page-head">
             <div>
-              <p class="eyebrow">Fallback rail</p>
               <h1>生图管线</h1>
               <p class="sort-hint">长按拖拽排序</p>
             </div>
@@ -69,7 +68,6 @@
         <section class="tab-panel" data-panel="templates">
           <div class="page-head">
             <div>
-              <p class="eyebrow">Prompt deck</p>
               <h1>图生图模板</h1>
               <p class="sort-hint">长按拖拽排序</p>
             </div>
@@ -81,9 +79,9 @@
         </section>
 
         <section class="tab-panel" data-panel="selfie">
+          <div class="workspace-section">
           <div class="page-head">
             <div>
-              <p class="eyebrow">Persona lab</p>
               <h1>自拍人设</h1>
             </div>
             <div class="toolbar">
@@ -99,9 +97,10 @@
             <div class="persona-list" id="persona-list"></div>
             <div class="editor-pane" id="persona-editor"></div>
           </div>
+          </div>
+          <div class="workspace-section">
           <div class="style-head">
             <div>
-              <p class="eyebrow">Style bank</p>
               <h2>自拍风格</h2>
             </div>
             <div class="toolbar">
@@ -116,12 +115,13 @@
             <div class="persona-list style-list" id="style-list"></div>
             <div class="editor-pane" id="style-editor"></div>
           </div>
+          </div>
         </section>
 
         <section class="tab-panel" data-panel="history">
+          <div class="workspace-section history-section">
           <div class="page-head">
             <div>
-              <p class="eyebrow">Generation ledger</p>
               <h1>生图统计</h1>
             </div>
             <div class="toolbar">
@@ -163,6 +163,8 @@
               </label>
               <label class="check-label history-favorite-filter"><input id="filter-favorites" type="checkbox" /><span>仅看收藏</span></label>
             </div>
+            <details class="history-filter-details" id="history-filter-details" open>
+              <summary>筛选条件</summary>
             <div class="history-filter-fields">
               <label class="history-filter-field"><span>开始日期</span><input id="filter-start" type="date" /></label>
               <label class="history-filter-field"><span>结束日期</span><input id="filter-end" type="date" /></label>
@@ -170,6 +172,7 @@
               <label class="history-filter-field"><span>生成模式</span><select id="filter-mode"></select></label>
               <label class="history-filter-field"><span>使用模型</span><select id="filter-model"></select></label>
             </div>
+            </details>
           </div>
           <div class="table-wrap">
             <table class="data-table">
@@ -188,6 +191,7 @@
               <tbody id="history-body"></tbody>
             </table>
           </div>
+          <div class="history-footer">
           <div class="history-actions">
             <span id="history-selected-count" aria-live="polite">已选 0 条（仅当前页）</span>
             <button class="btn danger" id="delete-history" type="button" disabled>删除所选</button>
@@ -207,10 +211,11 @@
               <button class="btn" id="history-jump" type="button">跳转</button>
             </div>
           </nav>
-
+          </div>
+          </div>
+          <div class="workspace-section cache-section">
           <div class="section-head">
             <div>
-              <p class="eyebrow">Cache contact sheet</p>
               <h1>缓存图库</h1>
             </div>
             <div class="toolbar">
@@ -220,12 +225,16 @@
                 <span>保存缓存</span>
               </label>
               <button class="btn danger" id="clear-cache" type="button">清理普通缓存</button>
+              <label class="check-label"><input id="cache-favorites" type="checkbox" />仅看收藏</label>
+              <label class="page-size-control">每页
+                <select id="cache-page-size"><option>12</option><option>24</option><option>48</option><option>96</option></select>
+              </label>
             </div>
           </div>
           <div class="cache-settings">
-            <label>最大 MB<input id="cache-max-mb" type="number" min="0" step="1" /></label>
-            <label>最长小时<input id="cache-max-hours" type="number" min="0" step="1" /></label>
-            <label>最多张数<input id="cache-max-count" type="number" min="0" step="1" /></label>
+            <div class="cache-field"><label for="cache-max-mb">最大 MB</label><input id="cache-max-mb" type="text" inputmode="decimal" data-number-type="float" data-min="0" data-allow-empty="true" aria-describedby="cache-max-mb-error" /><small class="field-error" id="cache-max-mb-error" role="status"></small></div>
+            <div class="cache-field"><label for="cache-max-hours">最长小时</label><input id="cache-max-hours" type="text" inputmode="decimal" data-number-type="float" data-min="0" data-allow-empty="true" aria-describedby="cache-max-hours-error" /><small class="field-error" id="cache-max-hours-error" role="status"></small></div>
+            <div class="cache-field"><label for="cache-max-count">最多张数</label><input id="cache-max-count" type="text" inputmode="numeric" data-number-type="int" data-min="0" data-allow-empty="true" aria-describedby="cache-max-count-error" /><small class="field-error" id="cache-max-count-error" role="status"></small></div>
           </div>
           <p class="cache-protection-hint">收藏图片不计入自动清理限制；一键清理保留收藏。取消收藏后将重新受限制约束。</p>
           <div class="cache-strip">
@@ -233,15 +242,6 @@
             <div><strong id="cache-size">0 KB</strong><span>占用空间</span></div>
             <div><strong id="cache-regular-summary">0 张 / 0 B</strong><span>普通缓存（受限额约束）</span></div>
             <div><strong id="cache-favorite-summary">0 张 / 0 B</strong><span>收藏（不计入限额）</span></div>
-            <label class="check-label"><input id="cache-favorites" type="checkbox" />仅看收藏</label>
-            <label>每页
-              <select id="cache-page-size">
-                <option>12</option>
-                <option>24</option>
-                <option>48</option>
-                <option>96</option>
-              </select>
-            </label>
           </div>
           <div id="cache-grid" class="image-grid"></div>
           <nav class="pager" id="cache-pager" aria-label="缓存图库分页">
@@ -259,15 +259,16 @@
               <button class="btn" id="cache-jump" type="button">跳转</button>
             </div>
           </nav>
+          </div>
         </section>
         <section class="tab-panel" data-panel="settings">
           <div class="page-head">
             <div>
-              <p class="eyebrow">Plugin settings</p>
               <h1>插件设置</h1>
               <p class="sort-hint">与 AstrBot 配置页同一份插件配置；图片缓存的设置在「统计」页</p>
             </div>
           </div>
+          <nav id="settings-jump" class="settings-jump" aria-label="定位设置分组"></nav>
           <div id="settings-groups" class="settings-groups"></div>
         </section>
       </main>

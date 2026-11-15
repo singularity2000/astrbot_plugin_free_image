@@ -8,6 +8,7 @@ from astrbot.core.message.components import At
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 from .history_cache import format_size
+from .nsfw import ImageDeliveryError, parse_nsfw_command, resolve_image_delivery
 from .providers.base import node_display_name
 from .selfie import find_persona, find_style, resolve_persona
 from .workflow import ImageInputError
@@ -73,6 +74,7 @@ class CommandHandlers:
             lines.append("画图模型 置顶 序号 将该模型置顶到管线顶部")
             lines.append("画图模型 开启/关闭 序号 将该模型启用或关闭")
         lines.append("文生图-序号 指定单个模型生图（图生图、模板、自拍同理）")
+        lines.append("命令[-序号]-NSFW 启用本次 NSFW；可加 =封面 或 =转发 指定方式")
         lines.append("文生视频/图生视频：敬请期待")
         return "\n".join(lines)
 
@@ -176,18 +178,30 @@ class CommandHandlers:
                 yield result
             return
 
-        # --- <命令>-<序号> 模式解析 ---
+        # --- <命令>[-<序号>]-NSFW[=封面|转发] / 原有模型序号 ---
         candidates = ["文生图", "图生图", "自拍"] + list(p.prompt_map.keys())
         candidates_sorted = sorted(set(candidates), key=len, reverse=True)
-        matched_cmd, model_index, remaining = self._parse_model_index_command(
-            text, candidates_sorted
-        )
+        try:
+            nsfw_command = parse_nsfw_command(text, candidates_sorted)
+        except ImageDeliveryError as exc:
+            yield p._quoted_plain_result(event, str(exc))
+            event.stop_event()
+            return
+        delivery = None
+        if nsfw_command:
+            matched_cmd = nsfw_command.command
+            model_index = nsfw_command.model_index
+            remaining = nsfw_command.prompt
+        else:
+            matched_cmd, model_index, remaining = self._parse_model_index_command(
+                text, candidates_sorted
+            )
 
         if matched_cmd is not None:
             pipeline_config = self.get_api_pipeline_config()
             is_admin = p.is_global_admin(event)
             # 序号超范围：按你确认的规则，报"命令格式或参数错误"+列表
-            if model_index > len(pipeline_config):
+            if model_index is not None and model_index > len(pipeline_config):
                 yield event.plain_result(
                     self.format_model_pipeline_message(
                         prefix="命令格式或参数错误，请重试。", is_admin=is_admin
@@ -195,18 +209,27 @@ class CommandHandlers:
                 )
                 event.stop_event()
                 return
-            node = pipeline_config[model_index - 1]
-            if not node.get("enabled", True):
-                yield p._quoted_plain_result(
-                    event, f"模型 {model_index}🔴{self.get_model_display_name(node)} 已关闭，请选择其他模型。"
-                )
-                event.stop_event()
-                return
+            if model_index is not None:
+                node = pipeline_config[model_index - 1]
+                if not node.get("enabled", True):
+                    yield p._quoted_plain_result(
+                        event, f"模型 {model_index}🔴{self.get_model_display_name(node)} 已关闭，请选择其他模型。"
+                    )
+                    event.stop_event()
+                    return
+            if nsfw_command:
+                try:
+                    delivery = resolve_image_delivery(event, p.conf, nsfw=True, mode=nsfw_command.mode)
+                except ImageDeliveryError as exc:
+                    yield p._quoted_plain_result(event, str(exc))
+                    event.stop_event()
+                    return
+            command_token = text.split(maxsplit=1)[0]
 
             if matched_cmd == "文生图":
                 if not remaining:
                     yield p._quoted_plain_result(
-                        event, f"请提供文生图的描述。用法: 文生图-{model_index} <描述>"
+                        event, f"请提供文生图的描述。用法: {command_token} <描述>"
                     )
                     event.stop_event()
                     return
@@ -214,6 +237,7 @@ class CommandHandlers:
                     event, remaining, is_i2i=False,
                     request_source="command", model_index=model_index,
                     generation_mode="text2image",
+                    delivery=delivery,
                 ):
                     yield res
                 event.stop_event()
@@ -222,7 +246,7 @@ class CommandHandlers:
             if matched_cmd == "图生图":
                 if not remaining:
                     yield p._quoted_plain_result(
-                        event, f"请提供图生图的描述。用法: 图生图-{model_index} <描述>（并发送或引用图片）"
+                        event, f"请提供图生图的描述。用法: {command_token} <描述>（并发送或引用图片）"
                     )
                     event.stop_event()
                     return
@@ -230,6 +254,7 @@ class CommandHandlers:
                     event, remaining, is_i2i=True,
                     request_source="command", model_index=model_index,
                     generation_mode="image2image",
+                    delivery=delivery,
                 ):
                     yield res
                 event.stop_event()
@@ -238,6 +263,7 @@ class CommandHandlers:
             if matched_cmd == "自拍":
                 async for _ in p._run_selfie(
                     event, remaining, is_llm_tool=False, model_index=model_index,
+                    delivery=delivery,
                 ):
                     yield _
                 event.stop_event()
@@ -249,11 +275,13 @@ class CommandHandlers:
                 if base_prompt is None:
                     return
                 user_prompt = f"{base_prompt} {remaining}" if remaining else base_prompt
-                display_name = f"{matched_cmd}-{model_index} {remaining}".strip()
+                model_suffix = f"-{model_index}" if model_index is not None else ""
+                display_name = f"{matched_cmd}{model_suffix} {remaining}".strip()
                 async for res in p.handle_image_gen_logic(
                     event, user_prompt, is_i2i=True,
                     display_name=display_name, request_source="command",
                     model_index=model_index, generation_mode="image2image",
+                    delivery=delivery,
                 ):
                     yield res
                 event.stop_event()
@@ -455,6 +483,9 @@ class CommandHandlers:
             msg += "\n\n/画图帮助 预设名 来查看对应模板的详细内容"
             msg += "\n\n生图指令: \n/文生图 你的描述 \n/图生图 你的描述（发送图片 或 引用图片 或 @用户,若为空则使用你的头像）"
             msg += "\n/预设指令 + 发送图片 或 引用图片 或 @用户 来使用模板图生图"
+            msg += "\n\nNSFW：/文生图-NSFW 描述，或 /图生图-nsfw=封面 描述"
+            msg += "\n指定模型：/手办化-2-NSFW；NSFW 必须在模型序号之后"
+            msg += "\n发送方式可选 =封面 或 =转发；不指定时使用后台默认值"
             yield event.plain_result(msg)
             return
         prompt = p.prompt_map.get(keyword)
@@ -501,8 +532,8 @@ class CommandHandlers:
         target = next(iter(targets), None)
         count = None
         if adding:
-            if not args or not args[-1].isdigit() or int(args[-1]) <= 0:
-                raise ValueError("请填写正整数次数。")
+            if not args or not re.fullmatch(r"[+-]?[0-9]+", args[-1]):
+                raise ValueError("请填写整数次数：正数增加，负数扣减，例如 10 或 -10。")
             count = int(args.pop())
         if args:
             if len(args) != 1 or not args[0].isdigit():
@@ -513,7 +544,7 @@ class CommandHandlers:
         if target is not None and (not target or target == "all"):
             raise ValueError("请指定一位有效的目标用户。")
         if adding and target is None:
-            raise ValueError("请指定需要增加次数的用户。")
+            raise ValueError("请指定需要调整次数的用户。")
         return target or event.get_sender_id(), count
 
     async def on_add_user_counts(self, event: AstrMessageEvent):
@@ -530,11 +561,26 @@ class CommandHandlers:
             )
             event.stop_event()
             return
-        await p.persistence.add_permanent_user_count(target_qq, count)
-        new_total_count = p.persistence.get_user_count(target_qq)
-        yield event.plain_result(
-            f"✅ 已为用户 {target_qq} 增加 {count} 次（永久），TA当前总剩余 {new_total_count} 次。"
+        try:
+            result = await p.persistence.adjust_user_count(target_qq, count)
+        except Exception as exc:
+            logger.error(f"调整用户生图次数失败: {exc}")
+            yield event.plain_result("❌ 次数保存失败，请查询当前余额并检查数据目录后重试。")
+            event.stop_event()
+            return
+        if count > 0:
+            message = f"✅ 已为用户 {target_qq} 增加 {count} 次（永久）。"
+        elif count < 0:
+            message = f"✅ 用户 {target_qq} 申请扣减 {-count} 次，实际扣减 {-result['applied']} 次。"
+        else:
+            message = f"用户 {target_qq} 次数未变化。"
+        message += (
+            f"\n当前总剩余 {result['remaining']} 次"
+            f"（永久 {result['permanent']} 次，今日额度剩余 {result['daily']} 次）。"
         )
+        if count < 0 and result["daily"] < p.conf.get("quota", {}).get("user_daily_fixed_quota", 0):
+            message += "\n每日额度次日照常恢复。"
+        yield event.plain_result(message)
         event.stop_event()
 
     async def on_add_group_counts(self, event: AstrMessageEvent):
@@ -583,6 +629,7 @@ class CommandHandlers:
             "📸 自拍命令\n"
             f"当前风格模式：{mode}  绑定模式：{binding}\n\n"
             "#自拍 <描述>\n"
+            "#自拍-NSFW <描述>；#自拍-1-nsfw=转发 <描述>（也可选 =封面）\n"
             "#自拍人设 查看 / 列表 / 添加 <ID> <名称> / 绑定 <ID或名称> / 默认 <ID或名称>\n"
             "#自拍风格 查看 / 列表 / 添加 <ID> <名称> <提示词> / 模式 <不注入/自动/指定> / 选择 <ID或名称>"
         )

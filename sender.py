@@ -1,8 +1,12 @@
+import asyncio
 from typing import Literal
 
-from astrbot.core.message.components import Image, Plain, Reply
+from astrbot import logger
+from astrbot.core.message.components import Image, Node, Nodes, Plain, Reply
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
+
+from .nsfw import ImageDelivery, ImageDeliveryError, create_apng
 
 
 class ImageResultSender:
@@ -86,7 +90,21 @@ class ImageResultSender:
         caption_text: str,
         concise_mode: bool,
         request_source: Literal["command", "llm_tool"],
+        delivery: ImageDelivery | None = None,
+        elapsed: float = 0.0,
+        model_name: str | None = None,
+        batch_index: int = 1,
+        batch_count: int = 1,
     ):
+        if delivery and delivery.mode != "normal":
+            await self._send_nsfw_images(
+                event=event, images=images, caption_text=caption_text,
+                concise_mode=concise_mode, request_source=request_source,
+                delivery=delivery, elapsed=elapsed, model_name=model_name,
+                batch_index=batch_index, batch_count=batch_count,
+            )
+            return
+
         quote_reply = self._should_quote_reply(request_source=request_source)
         split_images = len(images) > 1 and self._should_split_multi_images(event=event)
         reply_component = Reply(id=event.message_obj.message_id)
@@ -131,3 +149,71 @@ class ImageResultSender:
         yield event.chain_result([reply_component, Plain(caption_text)])
         chain = [Image.fromBytes(img) for img in images]
         await event.send(MessageChain(chain=chain))
+
+    async def _send_nsfw_images(
+        self,
+        *,
+        event: AstrMessageEvent,
+        images: list[bytes],
+        caption_text: str,
+        concise_mode: bool,
+        request_source: Literal["command", "llm_tool"],
+        delivery: ImageDelivery,
+        elapsed: float,
+        model_name: str | None,
+        batch_index: int,
+        batch_count: int,
+    ) -> None:
+        """Send explicitly so transport errors cannot bypass the fail-closed path."""
+        try:
+            if delivery.mode == "forward":
+                if event.get_platform_name() != "aiocqhttp":
+                    raise ImageDeliveryError("当前平台不支持合并转发。原图未直接发送。")
+                groups = [[img] for img in images] if self._should_split_multi_images(event=event) else [images]
+                sender_id = str(event.get_sender_id())
+                sender_name = event.get_sender_name() or sender_id
+                nodes = [
+                    Node(uin=sender_id, name=sender_name, content=[Image.fromBytes(img) for img in group])
+                    for group in groups
+                ]
+                if not concise_mode:
+                    nodes.append(Node(
+                        uin=str(event.get_self_id()), name="图片生成助手",
+                        content=[Plain(caption_text)],
+                    ))
+                # Even one image is a forward card. Do not mix Reply/Plain outside it.
+                await event.send(MessageChain(chain=[Nodes(nodes)]))
+                return
+
+            if delivery.mode != "apng":
+                raise ImageDeliveryError("NSFW 发送方式无效。原图未直接发送。")
+
+            wrapped: list[bytes] = []
+            try:
+                # Prepare the entire result before sending any image. Keep the originals
+                # untouched: history/cache have already received the provider bytes.
+                for index, img in enumerate(images, start=1):
+                    wrapped.append(await asyncio.to_thread(
+                        create_apng, img, elapsed=elapsed, model_name=model_name,
+                        font_path=delivery.font_path, image_index=index,
+                        image_count=len(images), batch_index=batch_index, batch_count=batch_count,
+                    ))
+            except Exception as exc:
+                logger.warning(f"[FreeImage NSFW] 封面包装失败（{type(exc).__name__}）")
+                raise ImageDeliveryError(
+                    "图片已生成，但 NSFW 封面包装失败。请检查图片格式、尺寸和中文字体；原图未直接发送。"
+                ) from exc
+
+            # Reuse existing concise/split/quote behavior only with the wrapped bytes.
+            async for message in self.yield_success_images(
+                event=event, images=wrapped, caption_text=caption_text,
+                concise_mode=concise_mode, request_source=request_source,
+            ):
+                await event.send(message)
+        except ImageDeliveryError:
+            raise
+        except Exception as exc:
+            logger.warning(f"[FreeImage NSFW] 发送失败（{type(exc).__name__}）")
+            raise ImageDeliveryError(
+                "图片已生成，但 NSFW 消息发送失败，部分结果可能未送达。原图未改为直接发送。"
+            ) from exc

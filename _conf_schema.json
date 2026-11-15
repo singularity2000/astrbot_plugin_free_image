@@ -728,6 +728,19 @@
                 "hint": "仅影响一次成功结果中多张图片彼此之间是否分开发送。单图时此项不会改变消息条数。不分条表示多张图片尽量合并为一条图片消息；分条表示多张图片逐张分开发送。",
                 "default": "始终不分条"
             },
+            "nsfw_send_mode": {
+                "description": "NSFW 默认发送方式",
+                "type": "string",
+                "options": ["APNG 模糊封面", "合并转发"],
+                "default": "APNG 模糊封面",
+                "hint": "仅在命令带 -NSFW 或 LLM 工具 nsfw=true 时生效。可用 -nsfw=封面 或 -nsfw=转发 覆盖本次选择。合并转发仅支持 OneBot v11；其他平台会在生图前提示，不扣次数。统计与缓存始终使用原图。"
+            },
+            "nsfw_font_path": {
+                "description": "NSFW 封面字体路径",
+                "type": "string",
+                "default": "",
+                "hint": "留空自动查找系统已有的中文字体；也可填写中文 TTF/OTF/TTC 文件路径。Docker 请填写容器内可访问的路径。找不到字体时会在生图前提示，不自动下载字体。只影响 APNG 封面。"
+            },
             "download_timeout": {
                 "description": "图片传输超时(秒)",
                 "type": "int",
